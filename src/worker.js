@@ -460,6 +460,188 @@ async function sendCsvEmail(env, to, filename, csv, count) {
   return { ok: true };
 }
 
+// ---------------------------------------------------------------------------
+// Marketing — GA4 (Google Analytics Data API v1). No SDK: service-account JWT
+// signed with WebCrypto RS256 -> OAuth token -> batchRunReports. Cached 1h in D1.
+// ---------------------------------------------------------------------------
+const GA4_PROPERTY = "542595696";
+const GA4_KEY_EVENTS = ["demo_link_requested", "demo_onboarding_complete", "demo_book_click"];
+
+function b64urlBytes(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlStr(str) { return b64urlBytes(new TextEncoder().encode(str)); }
+function bytesFromB64(b64) {
+  const bin = atob(b64);
+  const a = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
+  return a;
+}
+
+async function ga4AccessToken(env) {
+  if (!env.GA4_SA_KEY) throw new Error("GA4 is not configured (no GA4_SA_KEY).");
+  const sa = JSON.parse(env.GA4_SA_KEY);
+  const now = Math.floor(Date.now() / 1000);
+  const header = b64urlStr(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claim = b64urlStr(JSON.stringify({
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/analytics.readonly",
+    aud: sa.token_uri,
+    iat: now,
+    exp: now + 3600,
+  }));
+  const signingInput = `${header}.${claim}`;
+  const pkcs8 = sa.private_key.replace(/-----BEGIN PRIVATE KEY-----/, "").replace(/-----END PRIVATE KEY-----/, "").replace(/\s+/g, "");
+  const key = await crypto.subtle.importKey("pkcs8", bytesFromB64(pkcs8), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, key, new TextEncoder().encode(signingInput));
+  const jwt = `${signingInput}.${b64urlBytes(new Uint8Array(sig))}`;
+  const res = await fetch(sa.token_uri, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${jwt}`,
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    const e = new Error(`Google OAuth ${res.status}: ${t.slice(0, 300)}`);
+    e.status = res.status;
+    throw e;
+  }
+  const j = await res.json();
+  if (!j.access_token) throw new Error("Google OAuth: no access_token returned");
+  return j.access_token;
+}
+
+function ga4ParseReport(rep) {
+  const dh = ((rep && rep.dimensionHeaders) || []).map((h) => h.name);
+  const mh = ((rep && rep.metricHeaders) || []).map((h) => h.name);
+  return ((rep && rep.rows) || []).map((r) => {
+    const dims = {}, mets = {};
+    dh.forEach((n, i) => { dims[n] = (r.dimensionValues[i] || {}).value; });
+    mh.forEach((n, i) => { mets[n] = Number((r.metricValues[i] || {}).value || 0); });
+    return { dims, mets };
+  });
+}
+
+async function ga4Fetch(env) {
+  const token = await ga4AccessToken(env);
+  const cur = { startDate: "30daysAgo", endDate: "yesterday" };
+  const prev = { startDate: "60daysAgo", endDate: "31daysAgo" };
+  const body = {
+    requests: [
+      { dateRanges: [cur, prev], metrics: [{ name: "sessions" }, { name: "engagedSessions" }] },
+      {
+        dateRanges: [cur, prev],
+        dimensions: [{ name: "eventName" }],
+        metrics: [{ name: "eventCount" }],
+        dimensionFilter: { filter: { fieldName: "eventName", inListFilter: { values: GA4_KEY_EVENTS } } },
+      },
+      {
+        dateRanges: [cur],
+        dimensions: [{ name: "sessionSourceMedium" }],
+        metrics: [{ name: "sessions" }],
+        orderBys: [{ metric: { metricName: "sessions" }, desc: true }],
+        limit: 10,
+      },
+      {
+        dateRanges: [cur],
+        dimensions: [{ name: "date" }],
+        metrics: [{ name: "sessions" }],
+        orderBys: [{ dimension: { dimensionName: "date" } }],
+      },
+    ],
+  };
+  const res = await fetch(`https://analyticsdata.googleapis.com/v1beta/properties/${GA4_PROPERTY}:batchRunReports`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    const e = new Error(`GA4 API ${res.status}: ${t.slice(0, 300)}`);
+    e.status = res.status;
+    throw e;
+  }
+  const j = await res.json();
+  const reps = j.reports || [];
+  const totals = ga4ParseReport(reps[0]);
+  const c0 = totals.find((r) => r.dims.dateRange === "date_range_0") || { mets: {} };
+  const p0 = totals.find((r) => r.dims.dateRange === "date_range_1") || { mets: {} };
+  const ke = ga4ParseReport(reps[1]);
+  const keyEvents = {};
+  for (const ev of GA4_KEY_EVENTS) {
+    const c = ke.find((r) => r.dims.eventName === ev && r.dims.dateRange === "date_range_0");
+    const p = ke.find((r) => r.dims.eventName === ev && r.dims.dateRange === "date_range_1");
+    keyEvents[ev] = { cur: c ? c.mets.eventCount : 0, prev: p ? p.mets.eventCount : 0 };
+  }
+  return {
+    sessions: { cur: c0.mets.sessions || 0, prev: p0.mets.sessions || 0 },
+    engagedSessions: { cur: c0.mets.engagedSessions || 0, prev: p0.mets.engagedSessions || 0 },
+    keyEvents,
+    sourceMedium: ga4ParseReport(reps[2]).map((r) => ({ sourceMedium: r.dims.sessionSourceMedium || "(not set)", sessions: r.mets.sessions })),
+    daily: ga4ParseReport(reps[3]).map((r) => ({ date: r.dims.date, sessions: r.mets.sessions })).sort((a, b) => (a.date < b.date ? -1 : 1)),
+  };
+}
+
+// 1-hour cache in D1; on error/quota serve the last good cache if we have one.
+async function getGa4Data(env) {
+  const row = await env.DB.prepare(`SELECT data, fetched_at FROM ga4_cache WHERE k = 'google_30d'`).first();
+  if (row) {
+    const age = Date.now() - new Date(row.fetched_at).getTime();
+    if (age >= 0 && age < 3600000) return { data: JSON.parse(row.data), fetchedAt: row.fetched_at, cached: true };
+  }
+  try {
+    const data = await ga4Fetch(env);
+    const fetchedAt = new Date().toISOString();
+    await env.DB
+      .prepare(`INSERT INTO ga4_cache (k, data, fetched_at) VALUES ('google_30d', ?, ?)
+                ON CONFLICT(k) DO UPDATE SET data = excluded.data, fetched_at = excluded.fetched_at`)
+      .bind(JSON.stringify(data), fetchedAt)
+      .run();
+    return { data, fetchedAt, cached: false };
+  } catch (e) {
+    if (row) return { data: JSON.parse(row.data), fetchedAt: row.fetched_at, cached: true, stale: true, error: e.message };
+    return { error: e.message, status: e.status || null };
+  }
+}
+
+async function handleMarketingGoogle(session, env) {
+  const g = await getGa4Data(env);
+  if (g.error && !g.data) return json({ error: g.error, status: g.status });
+  return json({ ...g.data, fetchedAt: g.fetchedAt, cached: !!g.cached, stale: !!g.stale, staleError: g.error || null });
+}
+
+async function handleMarketingOverview(session, env) {
+  const since = "datetime('now','-30 days')";
+  const { results: srcRows } = await env.DB
+    .prepare(`SELECT source, COUNT(*) c FROM leads WHERE tenant_id = ? AND created_at >= ${since} GROUP BY source`)
+    .bind(session.tenant_id)
+    .all();
+  const bySource = {};
+  srcRows.forEach((r) => { bySource[r.source] = r.c; });
+  const { results: dayRows } = await env.DB
+    .prepare(`SELECT substr(created_at,1,10) d, COUNT(*) c FROM leads WHERE tenant_id = ? AND created_at >= ${since} GROUP BY d ORDER BY d`)
+    .bind(session.tenant_id)
+    .all();
+
+  const g = await getGa4Data(env);
+  const gd = g.data || null;
+  const channels = [
+    { channel: "google", live: true, sessions: gd ? gd.sessions.cur : null, leads: bySource.google || 0, conversions: gd ? gd.keyEvents.demo_book_click.cur : null, error: gd ? null : (g.error || null) },
+    { channel: "linkedin", live: false, sessions: null, leads: bySource.linkedin || 0, conversions: null },
+    { channel: "meta", live: false, sessions: null, leads: bySource.meta || 0, conversions: null },
+    { channel: "email", live: false, sessions: null, leads: bySource.email || 0, conversions: null },
+    { channel: "sms", live: false, sessions: null, leads: bySource.sms || 0, conversions: null },
+  ];
+  return json({
+    channels,
+    leadsBySource: srcRows.map((r) => ({ source: r.source, count: r.c })),
+    leadsByDay: dayRows.map((r) => ({ date: r.d, count: r.c })),
+    fetchedAt: g.fetchedAt || null,
+  });
+}
+
 async function handlePatchLead(session, env, id, req) {
   const body = await req.json().catch(() => null);
   if (!body) return err("Invalid request body");
@@ -842,6 +1024,8 @@ export default {
       if (path === "/api/me" && method === "GET") return await handleMe(session, env);
       if (path === "/api/stages" && method === "GET") return await handleGetStages(session, env);
       if (path === "/api/dashboard" && method === "GET") return await handleDashboard(session, env);
+      if (path === "/api/marketing/google" && method === "GET") return await handleMarketingGoogle(session, env);
+      if (path === "/api/marketing/overview" && method === "GET") return await handleMarketingOverview(session, env);
       if (path === "/api/invites" && method === "POST")
         return await handleCreateInvite(session, env, req);
 

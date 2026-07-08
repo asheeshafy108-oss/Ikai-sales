@@ -13,6 +13,7 @@
     <nav class="tabs">
       <button class="tab active" id="tabDashboard" data-tab="dashboard">Dashboard</button>
       <button class="tab" id="tabPipeline" data-tab="pipeline">Pipeline</button>
+      <button class="tab" id="tabMarketing" data-tab="marketing">Marketing</button>
     </nav>
     <div class="spacer"></div>
     <button class="btn" id="addLeadBtn">+ Add lead</button>
@@ -60,6 +61,126 @@
         <button class="btn ghost sm" id="exportAll" type="button">Export all</button>
       </div>
       <div class="board" id="board"><div class="empty">Loading…</div></div>
+    </section>
+
+    <!-- Marketing tab -->
+    <section id="marketingView" class="hidden">
+      <nav class="subtabs" id="channelTabs">
+        <button class="subtab active" data-channel="overview">Overview</button>
+        <button class="subtab" data-channel="google">Google</button>
+        <button class="subtab" data-channel="linkedin">LinkedIn</button>
+        <button class="subtab" data-channel="meta">Meta</button>
+        <button class="subtab" data-channel="email">Email</button>
+        <button class="subtab" data-channel="sms">SMS</button>
+      </nav>
+
+      <!-- Overview -->
+      <div id="ch-overview" class="channel-panel">
+        <div class="panel">
+          <h3 class="panel-title">Channels · last 30 days</h3>
+          <div id="ov-channels"><div class="panel-empty">Loading…</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Leads by source · last 30 days</h3><div id="ov-source"></div></div>
+          <div class="panel"><h3 class="panel-title">Leads created · last 30 days</h3><div id="ov-trend"></div></div>
+        </div>
+      </div>
+
+      <!-- Google (live GA4) -->
+      <div id="ch-google" class="channel-panel hidden">
+        <div class="channel-head">
+          <div class="ch-icon google">G</div>
+          <div><div class="ch-name">Google</div><div class="ch-status live">Live · GA4</div></div>
+          <div class="spacer"></div>
+          <div class="data-asof" id="g-asof"></div>
+        </div>
+        <div id="g-error"></div>
+        <div class="kpi-row" id="g-kpis"><div class="panel-empty">Loading…</div></div>
+        <div class="section-label">Key events · last 30 days</div>
+        <div class="kpi-row" id="g-events"></div>
+        <div class="section-label">Google Ads <span class="muted-note">· connect in Phase 2</span></div>
+        <div class="kpi-row" id="g-ads">
+          <div class="kpi-card ph"><div class="k-label">Spend</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
+          <div class="kpi-card ph"><div class="k-label">Avg CPC</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
+          <div class="kpi-card ph"><div class="k-label">CTR</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Sessions · last 30 days</h3><div id="g-daily"></div></div>
+          <div class="panel"><h3 class="panel-title">Sessions by source / medium</h3><div id="g-sourcemedium"></div></div>
+        </div>
+      </div>
+
+      <!-- LinkedIn (placeholder) -->
+      <div id="ch-linkedin" class="channel-panel hidden">
+        <div class="channel-head">
+          <div class="ch-icon linkedin">in</div>
+          <div><div class="ch-name">LinkedIn</div><div class="ch-status">Not connected yet</div></div>
+        </div>
+        <div class="kpi-row ph-skeleton">
+          <div class="kpi-card ph"><div class="k-label">Impressions</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Clicks</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Leads</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Spend</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Performance</h3><div class="panel-empty">Connect LinkedIn Ads to light this up.</div></div>
+          <div class="panel"><h3 class="panel-title">By campaign</h3><div class="panel-empty">Connect LinkedIn Ads to light this up.</div></div>
+        </div>
+      </div>
+
+      <!-- Meta (placeholder) -->
+      <div id="ch-meta" class="channel-panel hidden">
+        <div class="channel-head">
+          <div class="ch-icon meta">∞</div>
+          <div><div class="ch-name">Meta</div><div class="ch-status">Not connected yet</div></div>
+        </div>
+        <div class="kpi-row ph-skeleton">
+          <div class="kpi-card ph"><div class="k-label">Impressions</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Clicks</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Leads</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Spend</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Performance</h3><div class="panel-empty">Connect Meta Ads to light this up.</div></div>
+          <div class="panel"><h3 class="panel-title">By campaign</h3><div class="panel-empty">Connect Meta Ads to light this up.</div></div>
+        </div>
+      </div>
+
+      <!-- Email (placeholder) -->
+      <div id="ch-email" class="channel-panel hidden">
+        <div class="channel-head">
+          <div class="ch-icon email">✉</div>
+          <div><div class="ch-name">Email</div><div class="ch-status">Not connected yet</div></div>
+        </div>
+        <div class="kpi-row ph-skeleton">
+          <div class="kpi-card ph"><div class="k-label">Sent</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Open rate</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Click rate</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Leads</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Performance</h3><div class="panel-empty">Connect your email tool to light this up.</div></div>
+          <div class="panel"><h3 class="panel-title">By campaign</h3><div class="panel-empty">Connect your email tool to light this up.</div></div>
+        </div>
+      </div>
+
+      <!-- SMS (placeholder) -->
+      <div id="ch-sms" class="channel-panel hidden">
+        <div class="channel-head">
+          <div class="ch-icon sms">✆</div>
+          <div><div class="ch-name">SMS</div><div class="ch-status">Not connected yet</div></div>
+        </div>
+        <div class="kpi-row ph-skeleton">
+          <div class="kpi-card ph"><div class="k-label">Sent</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Delivered</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Replies</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+          <div class="kpi-card ph"><div class="k-label">Leads</div><div class="k-value">—</div><div class="k-sub">—</div></div>
+        </div>
+        <div class="dash-grid">
+          <div class="panel"><h3 class="panel-title">Performance</h3><div class="panel-empty">Connect your SMS tool to light this up.</div></div>
+          <div class="panel"><h3 class="panel-title">By campaign</h3><div class="panel-empty">Connect your SMS tool to light this up.</div></div>
+        </div>
+      </div>
     </section>
   </main>
 

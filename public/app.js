@@ -78,12 +78,14 @@ async function loadDashboard() {
 
 // ---------- tabs ----------
 function showTab(name) {
-  const dash = name === "dashboard";
-  $("dashboardView").classList.toggle("hidden", !dash);
-  $("pipelineView").classList.toggle("hidden", dash);
-  $("tabDashboard").classList.toggle("active", dash);
-  $("tabPipeline").classList.toggle("active", !dash);
-  if (dash) loadDashboard().catch(() => {});
+  $("dashboardView").classList.toggle("hidden", name !== "dashboard");
+  $("pipelineView").classList.toggle("hidden", name !== "pipeline");
+  $("marketingView").classList.toggle("hidden", name !== "marketing");
+  $("tabDashboard").classList.toggle("active", name === "dashboard");
+  $("tabPipeline").classList.toggle("active", name === "pipeline");
+  $("tabMarketing").classList.toggle("active", name === "marketing");
+  if (name === "dashboard") loadDashboard().catch(() => {});
+  if (name === "marketing") loadMarketing().catch(() => {});
 }
 document.querySelectorAll(".tab").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 
@@ -637,6 +639,110 @@ $("confirmImport").onclick = async () => {
     showMsg($("importMsg"), err.message);
   }
 };
+
+// ---------- marketing ----------
+let marketingWired = false;
+async function loadMarketing() {
+  if (!marketingWired) {
+    marketingWired = true;
+    document.querySelectorAll("#channelTabs .subtab").forEach((b) => { b.onclick = () => showChannel(b.dataset.channel); });
+  }
+  try {
+    renderOverview(await api("/api/marketing/overview"));
+  } catch (e) {
+    $("ov-channels").innerHTML = '<div class="panel-empty">Couldn\'t load overview: ' + escapeHtml(e.message) + "</div>";
+  }
+}
+
+function showChannel(name) {
+  document.querySelectorAll("#channelTabs .subtab").forEach((b) => b.classList.toggle("active", b.dataset.channel === name));
+  ["overview", "google", "linkedin", "meta", "email", "sms"].forEach((c) => $("ch-" + c).classList.toggle("hidden", c !== name));
+  if (name === "google") loadGoogle();
+}
+
+async function loadGoogle() {
+  try { renderGoogle(await api("/api/marketing/google")); }
+  catch (e) { renderGoogleError(e.message); }
+}
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  try { return new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); }
+  catch { return iso; }
+}
+function kpiCard(label, value, sub, cls) {
+  return `<div class="kpi-card${cls ? " " + cls : ""}"><div class="k-label">${label}</div><div class="k-value">${value}</div><div class="k-sub">${sub}</div></div>`;
+}
+
+// single-series line chart — mirrors the dashboard flow chart
+function lineChart(values, color) {
+  const n = values.length;
+  if (!n) return '<div class="panel-empty">No data yet.</div>';
+  const W = 320, H = 150, padL = 22, padR = 10, padT = 12, padB = 22;
+  const max = Math.max(1, ...values);
+  const x = (i) => (n === 1 ? padL + (W - padL - padR) / 2 : padL + (i * (W - padL - padR)) / (n - 1));
+  const y = (v) => padT + (1 - v / max) * (H - padT - padB);
+  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const dots = values.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2" fill="${color}"/>`).join("");
+  const grid = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#26305a" stroke-width="1"/>
+    <line x1="${padL}" y1="${y(max)}" x2="${W - padR}" y2="${y(max)}" stroke="#26305a" stroke-width="0.5" stroke-dasharray="3 3"/>
+    <text x="2" y="${(y(max) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">${max}</text>
+    <text x="2" y="${(y(0) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">0</text>`;
+  return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">${grid}<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts}"/>${dots}</svg>`;
+}
+
+// horizontal bars — mirrors the funnel / source pattern
+function barRows(rows, color, empty) {
+  if (!rows.length) return '<div class="panel-empty">' + (empty || "No data yet.") + "</div>";
+  const max = Math.max(1, ...rows.map((r) => r.value));
+  return rows.map((r) => {
+    const pct = (r.value / max) * 100;
+    return `<div class="funnel-row">
+      <div class="funnel-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</div>
+      <svg class="bar" viewBox="0 0 100 16" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="16" fill="#1b2342"/><rect x="0" y="0" width="${pct.toFixed(2)}" height="16" fill="${color || "#6366f1"}"/></svg>
+      <div class="funnel-val"><b>${r.value}</b>${r.sub ? " · " + r.sub : ""}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderOverview(o) {
+  const label = { google: "Google", linkedin: "LinkedIn", meta: "Meta", email: "Email", sms: "SMS" };
+  const cell = (v) => (v == null ? '<span class="muted">—</span>' : v.toLocaleString());
+  $("ov-channels").innerHTML =
+    `<table class="ov-table"><thead><tr><th>Channel</th><th>Sessions</th><th>Leads</th><th>Conversions</th></tr></thead><tbody>` +
+    o.channels.map((c) => {
+      const name = `<span class="ov-ch"><span class="dot" style="background:${sourceColor(c.channel)}"></span>${label[c.channel] || c.channel}${c.live ? "" : ' <span class="tag">soon</span>'}</span>`;
+      return `<tr${c.live ? "" : ' class="muted-row"'}><td>${name}</td><td>${cell(c.sessions)}</td><td>${c.leads.toLocaleString()}</td><td>${cell(c.conversions)}</td></tr>`;
+    }).join("") + `</tbody></table>`;
+  $("ov-source").innerHTML = barRows((o.leadsBySource || []).map((s) => ({ label: s.source, value: s.count })), "#6366f1", "No leads in the last 30 days.");
+  $("ov-trend").innerHTML = (o.leadsByDay && o.leadsByDay.length)
+    ? lineChart(o.leadsByDay.map((d) => d.count), "#6366f1")
+    : '<div class="panel-empty">No leads created in the last 30 days.</div>';
+}
+
+function renderGoogleError(msg) {
+  $("g-error").innerHTML = `<div class="error-card"><b>Google Analytics didn't load.</b><div>${escapeHtml(msg)}</div></div>`;
+  $("g-kpis").innerHTML = ""; $("g-events").innerHTML = "";
+  $("g-daily").innerHTML = '<div class="panel-empty">—</div>';
+  $("g-sourcemedium").innerHTML = '<div class="panel-empty">—</div>';
+  $("g-asof").textContent = "";
+}
+
+function renderGoogle(g) {
+  if (g.error && g.sessions == null) { renderGoogleError(g.error); return; }
+  $("g-error").innerHTML = "";
+  $("g-asof").textContent = (g.stale ? "Cached · " : "") + "data as of " + fmtTime(g.fetchedAt);
+  $("g-kpis").innerHTML =
+    kpiCard("Sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`) +
+    kpiCard("Engaged sessions", g.engagedSessions.cur.toLocaleString(), `vs ${g.engagedSessions.prev} prior · ${deltaHtml(g.engagedSessions.cur, g.engagedSessions.prev)}`);
+  const evLabel = { demo_link_requested: "Demo link requested", demo_onboarding_complete: "Onboarding complete", demo_book_click: "Book-a-consult clicks" };
+  $("g-events").innerHTML = Object.keys(evLabel).map((k) => {
+    const e = g.keyEvents[k] || { cur: 0, prev: 0 };
+    return kpiCard(evLabel[k], e.cur.toLocaleString(), `vs ${e.prev} prior · ${deltaHtml(e.cur, e.prev)}`);
+  }).join("");
+  $("g-daily").innerHTML = lineChart((g.daily || []).map((d) => d.sessions), "#6366f1");
+  $("g-sourcemedium").innerHTML = barRows((g.sourceMedium || []).map((s) => ({ label: s.sourceMedium, value: s.sessions })), "#a5b4fc", "No session data.");
+}
 
 // ---------- logout ----------
 $("logoutBtn").onclick = async () => {
