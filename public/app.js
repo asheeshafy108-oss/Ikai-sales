@@ -1,7 +1,7 @@
 // ikai-sales dashboard client.
 const $ = (id) => document.getElementById(id);
 
-let STATE = { me: null, stages: [], leads: [], parsedRows: [] };
+let STATE = { me: null, stages: [], leads: [], parsedRows: [], marketingRange: "monthly", marketingChannel: "overview" };
 
 // ---------- api ----------
 async function api(url, opts = {}) {
@@ -74,6 +74,38 @@ async function loadDashboard() {
   STATE.dashboard = d;
   if (d.stages) STATE.stages = d.stages;
   renderDashboard(d);
+  // marketing summary row + smart empty-state (best-effort; never blocks the dashboard)
+  try {
+    const g = await api("/api/marketing/google?range=monthly");
+    STATE.googleData = g;
+    renderDashMarketing(g);
+    maybeSwapFlowForSessions(d, g);
+  } catch (e) {
+    $("dashMktRow").innerHTML = '<div class="panel-empty">Marketing data unavailable right now.</div>';
+  }
+}
+
+function renderDashMarketing(g) {
+  if (!g || g.sessions == null) { $("dashMktRow").innerHTML = '<div class="panel-empty">Marketing data unavailable right now.</div>'; return; }
+  const ke = g.keyEvents || {};
+  const b = g.budget || {};
+  const ev = (k) => (ke[k] ? ke[k].cur : 0);
+  $("dashMktRow").innerHTML =
+    kpiCard("Website sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`) +
+    kpiCard("Demo link requests", ev("demo_link_requested").toLocaleString(), "GA4 conversion") +
+    kpiCard("Onboarding completes", ev("demo_onboarding_complete").toLocaleString(), "GA4 conversion") +
+    kpiCard("Ad daily budget", audMoney(b.dailyBudget || 0), "AUD · Google Ads");
+}
+
+// When the pipeline has no activity, the 8-week flow chart is just a flat zero —
+// swap it for the live GA4 sessions trend so the panel is useful from day one.
+function maybeSwapFlowForSessions(d, g) {
+  const activity = (d.weekly.created || []).reduce((a, b) => a + b, 0) + (d.weekly.won || []).reduce((a, b) => a + b, 0);
+  if (activity === 0 && g && g.sessions != null && g.daily && g.daily.length) {
+    $("flowTitle").textContent = "Website sessions · " + (g.rangeLabel || "last 30 days");
+    $("flowChart").innerHTML = lineChart(g.daily.map((x) => x.sessions), sourceColor("google"));
+    $("flowLegend").innerHTML = '<span class="muted">No pipeline activity yet — showing website sessions from GA4 instead.</span>';
+  }
 }
 
 // ---------- tabs ----------
@@ -673,15 +705,19 @@ async function loadMarketing() {
   if (!marketingWired) {
     marketingWired = true;
     document.querySelectorAll("#channelTabs .subtab").forEach((b) => { b.onclick = () => showChannel(b.dataset.channel); });
+    document.querySelectorAll("#rangeSelect button").forEach((b) => { b.onclick = () => setMarketingRange(b.dataset.range); });
   }
-  try {
-    renderOverview(await api("/api/marketing/overview"));
-  } catch (e) {
-    $("ov-channels").innerHTML = '<div class="panel-empty">Couldn\'t load overview: ' + escapeHtml(e.message) + "</div>";
-  }
+  loadChannel(STATE.marketingChannel);
+}
+
+function setMarketingRange(range) {
+  STATE.marketingRange = range;
+  document.querySelectorAll("#rangeSelect button").forEach((b) => b.classList.toggle("active", b.dataset.range === range));
+  loadChannel(STATE.marketingChannel);
 }
 
 function showChannel(name) {
+  STATE.marketingChannel = name;
   document.querySelectorAll("#channelTabs .subtab").forEach((b) => {
     const on = b.dataset.channel === name;
     b.classList.toggle("active", on);
@@ -691,12 +727,64 @@ function showChannel(name) {
     b.style.color = on && accent ? accent : "";
   });
   ["overview", "google", "linkedin", "meta", "email", "sms"].forEach((c) => $("ch-" + c).classList.toggle("hidden", c !== name));
-  if (name === "google") loadGoogle();
+  loadChannel(name);
 }
 
-async function loadGoogle() {
-  try { renderGoogle(await api("/api/marketing/google")); }
+// (re)load whichever channel is showing, at the current range
+function loadChannel(name) {
+  const r = STATE.marketingRange;
+  if (name === "overview") return loadOverview(r);
+  if (name === "google") return loadGoogle(r);
+  if (name === "linkedin") return loadLinkedin(r);
+  // meta / email / sms are static "soon" placeholders
+}
+async function loadOverview(range) {
+  try { renderOverview(await api(`/api/marketing/overview?range=${range}`)); }
+  catch (e) { $("ov-channels").innerHTML = '<div class="panel-empty">Couldn\'t load overview: ' + escapeHtml(e.message) + "</div>"; }
+}
+async function loadGoogle(range) {
+  try { renderGoogle(await api(`/api/marketing/google?range=${range || STATE.marketingRange}`)); }
   catch (e) { renderGoogleError(e.message); }
+}
+async function loadLinkedin(range) {
+  try { renderLinkedin(await api(`/api/marketing/linkedin?range=${range || STATE.marketingRange}`)); }
+  catch (e) { renderLinkedin({ error: e.message }); }
+}
+
+function agoLabel(iso) {
+  if (!iso) return "just now";
+  const min = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} minute${min === 1 ? "" : "s"} ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} hour${hr === 1 ? "" : "s"} ago`;
+  const d = Math.floor(hr / 24);
+  return `${d} day${d === 1 ? "" : "s"} ago`;
+}
+
+function renderLinkedin(g) {
+  STATE.linkedinData = g;
+  if (g.error && g.sessions == null) {
+    $("li-error").innerHTML = `<div class="error-card"><b>LinkedIn data didn't load.</b><div>${escapeHtml(g.error)}</div></div>`;
+    $("li-kpis").innerHTML = ""; $("li-events").innerHTML = "";
+    $("li-daily").innerHTML = '<div class="panel-empty">—</div>'; $("li-updated").textContent = "";
+    return;
+  }
+  $("li-error").innerHTML = "";
+  $("li-updated").textContent = "updated " + agoLabel(g.fetchedAt);
+  $("li-rangelabel").textContent = g.rangeLabel || "";
+  const c = sourceColor("linkedin");
+  $("li-kpis").innerHTML =
+    kpiCard("Sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`) +
+    kpiCard("Leads", (g.leads || 0).toLocaleString(), "in the pipeline · source LinkedIn") +
+    kpiCard("Conversions", (g.conversions || 0).toLocaleString(), "key events from LinkedIn traffic") +
+    kpiCard("Engaged sessions", g.engagedSessions.cur.toLocaleString(), `vs ${g.engagedSessions.prev} prior · ${deltaHtml(g.engagedSessions.cur, g.engagedSessions.prev)}`);
+  const evLabel = { demo_link_requested: "Demo link requests", demo_onboarding_complete: "Onboarding completes", demo_book_click: "Book-a-consult clicks" };
+  $("li-events").innerHTML = Object.keys(evLabel).map((k) => {
+    const e = g.keyEvents[k] || { cur: 0, prev: 0 };
+    return kpiCard(evLabel[k], e.cur.toLocaleString(), `vs ${e.prev} prior · ${deltaHtml(e.cur, e.prev)}`);
+  }).join("");
+  $("li-daily").innerHTML = lineChart((g.daily || []).map((d) => d.sessions), c);
 }
 
 function fmtTime(iso) {
@@ -779,6 +867,7 @@ function renderGoogle(g) {
   if (g.error && g.sessions == null) { renderGoogleError(g.error, g); return; }
   $("g-error").innerHTML = "";
   $("g-asof").textContent = (g.stale ? "Cached · " : "") + "data as of " + fmtTime(g.fetchedAt);
+  document.querySelectorAll("#ch-google .range-label").forEach((e) => { e.textContent = "· " + (g.rangeLabel || "last 30 days"); });
   // Campaign conversions — the two demo conversions are the hero
   const evLabel = { demo_link_requested: "Demo link requests", demo_onboarding_complete: "Onboarding completes", demo_book_click: "Book-a-consult clicks" };
   const hero = { demo_link_requested: 1, demo_onboarding_complete: 1 };
@@ -843,6 +932,9 @@ function serialiseVisibleData() {
     : !$("pipelineView").classList.contains("hidden") ? "pipeline"
     : "marketing";
   const out = { activeTab: tab };
+  // leads live ONLY in the pipeline — included on every view so the assistant
+  // never mistakes GA4 conversion events for leads.
+  out.pipelineLeadCount = STATE.leads.length;
   if (STATE.me && STATE.me.tenant) out.workspace = STATE.me.tenant.name;
   if (tab === "dashboard") out.dashboard = serialiseDashboard();
   else if (tab === "pipeline") out.pipeline = serialisePipeline();

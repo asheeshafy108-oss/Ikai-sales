@@ -25,14 +25,17 @@
   <main>
     <!-- Dashboard tab -->
     <section id="dashboardView">
+      <div class="section-label">Sales <span class="muted-note">· pipeline</span></div>
       <div class="kpi-row" id="kpiRow"></div>
+      <div class="section-label">Marketing <span class="muted-note">· last 30 days</span></div>
+      <div class="kpi-row" id="dashMktRow"></div>
       <div class="dash-grid">
         <div class="panel">
           <h3 class="panel-title">Funnel</h3>
           <div id="funnelChart"></div>
         </div>
         <div class="panel">
-          <h3 class="panel-title">Pipeline flow · last 8 weeks</h3>
+          <h3 class="panel-title" id="flowTitle">Pipeline flow · last 8 weeks</h3>
           <div id="flowChart"></div>
           <div class="legend" id="flowLegend"></div>
         </div>
@@ -65,14 +68,22 @@
 
     <!-- Marketing tab -->
     <section id="marketingView" class="hidden">
-      <nav class="subtabs" id="channelTabs">
-        <button class="subtab active" data-channel="overview">Overview</button>
-        <button class="subtab" data-channel="google">Google</button>
-        <button class="subtab" data-channel="linkedin">LinkedIn</button>
-        <button class="subtab" data-channel="meta">Meta</button>
-        <button class="subtab" data-channel="email">Email</button>
-        <button class="subtab" data-channel="sms">SMS</button>
-      </nav>
+      <div class="mkt-header">
+        <nav class="subtabs" id="channelTabs">
+          <button class="subtab active" data-channel="overview">Overview</button>
+          <button class="subtab" data-channel="google">Google</button>
+          <button class="subtab" data-channel="linkedin">LinkedIn</button>
+          <button class="subtab" data-channel="meta">Meta <span class="soon">soon</span></button>
+          <button class="subtab" data-channel="email">Email <span class="soon">soon</span></button>
+          <button class="subtab" data-channel="sms">SMS <span class="soon">soon</span></button>
+        </nav>
+        <div class="range-select" id="rangeSelect">
+          <button type="button" data-range="daily">Daily</button>
+          <button type="button" data-range="weekly">Weekly</button>
+          <button type="button" class="active" data-range="monthly">Monthly</button>
+          <button type="button" data-range="yearly">Yearly</button>
+        </div>
+      </div>
 
       <!-- Overview -->
       <div id="ch-overview" class="channel-panel">
@@ -95,14 +106,14 @@
           <div class="data-asof" id="g-asof"></div>
         </div>
         <div id="g-error"></div>
-        <div class="section-label">Campaign conversions <span class="muted-note">· last 30 days</span></div>
+        <div class="section-label">Campaign conversions <span class="muted-note range-label">· last 30 days</span></div>
         <div class="kpi-row" id="g-events"><div class="panel-empty">Loading…</div></div>
         <div class="section-label">Budget &amp; spend</div>
         <div class="kpi-row" id="g-budget"></div>
-        <div class="section-label">Traffic <span class="muted-note">· last 30 days</span></div>
+        <div class="section-label">Traffic <span class="muted-note range-label">· last 30 days</span></div>
         <div class="kpi-row" id="g-kpis"></div>
         <div class="dash-grid">
-          <div class="panel"><h3 class="panel-title">Sessions · last 30 days</h3><div id="g-daily"></div></div>
+          <div class="panel"><h3 class="panel-title">Sessions <span class="range-label">· last 30 days</span></h3><div id="g-daily"></div></div>
           <div class="panel"><h3 class="panel-title">Sessions by source / medium</h3><div id="g-sourcemedium"></div></div>
         </div>
       </div>
@@ -111,18 +122,15 @@
       <div id="ch-linkedin" class="channel-panel hidden">
         <div class="channel-head">
           <div class="ch-icon linkedin">in</div>
-          <div><div class="ch-name">LinkedIn</div><div class="ch-status">Not connected yet</div></div>
+          <div><div class="ch-name">LinkedIn</div><div class="ch-status live">Live · GA4</div></div>
+          <div class="spacer"></div>
+          <div class="data-asof" id="li-updated"></div>
         </div>
-        <div class="kpi-row ph-skeleton">
-          <div class="kpi-card ph"><div class="k-label">Impressions</div><div class="k-value">—</div><div class="k-sub">—</div></div>
-          <div class="kpi-card ph"><div class="k-label">Clicks</div><div class="k-value">—</div><div class="k-sub">—</div></div>
-          <div class="kpi-card ph"><div class="k-label">Leads</div><div class="k-value">—</div><div class="k-sub">—</div></div>
-          <div class="kpi-card ph"><div class="k-label">Spend</div><div class="k-value">—</div><div class="k-sub">—</div></div>
-        </div>
-        <div class="dash-grid">
-          <div class="panel"><h3 class="panel-title">Performance</h3><div class="panel-empty">Connect LinkedIn Ads to light this up.</div></div>
-          <div class="panel"><h3 class="panel-title">By campaign</h3><div class="panel-empty">Connect LinkedIn Ads to light this up.</div></div>
-        </div>
+        <div id="li-error"></div>
+        <div class="kpi-row" id="li-kpis"><div class="panel-empty">Loading…</div></div>
+        <div class="section-label">Campaign conversions <span class="muted-note">· from LinkedIn traffic</span></div>
+        <div class="kpi-row" id="li-events"></div>
+        <div class="panel"><h3 class="panel-title">LinkedIn sessions · <span id="li-rangelabel">last 30 days</span></h3><div id="li-daily"></div></div>
       </div>
 
       <!-- Meta (placeholder) -->

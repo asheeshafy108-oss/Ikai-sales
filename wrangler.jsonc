@@ -17,6 +17,9 @@
   "routes": [
     { "pattern": "app.ikai.com.au", "custom_domain": true }
   ],
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",
