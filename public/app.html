@@ -79,6 +79,12 @@
             <label>Source</label>
             <select id="a-source">
               <option value="manual">Manual</option>
+              <option value="google">Google</option>
+              <option value="linkedin">LinkedIn</option>
+              <option value="meta">Meta</option>
+              <option value="email">Email</option>
+              <option value="sms">SMS</option>
+              <option value="web">Web</option>
               <option value="csv">CSV</option>
               <option value="demo">Demo</option>
               <option value="booking">Booking</option>
@@ -163,6 +169,22 @@
       <div class="modal-head"><h2>Import CSV</h2><button class="close-x" data-close="importOverlay">×</button></div>
       <p class="sub" style="margin:0 0 12px;">Columns: <code>name,company,email,phone,value,notes</code>. First row may be a header.</p>
       <input type="file" id="csvFile" accept=".csv,text/csv" />
+      <div style="margin:12px 0;">
+        <label>Source for imported leads</label>
+        <select id="i-source">
+          <option value="csv">CSV</option>
+          <option value="manual">Manual</option>
+          <option value="google">Google</option>
+          <option value="linkedin">LinkedIn</option>
+          <option value="meta">Meta</option>
+          <option value="email">Email</option>
+          <option value="sms">SMS</option>
+          <option value="web">Web</option>
+          <option value="demo">Demo</option>
+          <option value="booking">Booking</option>
+          <option value="call">Call</option>
+        </select>
+      </div>
       <div class="csv-preview" id="csvPreview"></div>
       <button class="btn block hidden" id="confirmImport">Import <span id="importCount"></span> leads</button>
       <div class="msg" id="importMsg"></div>

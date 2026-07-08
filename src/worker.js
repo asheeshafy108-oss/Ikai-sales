@@ -267,8 +267,11 @@ async function handleGetLeads(session, env) {
   return json({ stages, leads });
 }
 
+// Valid lead sources — built-ins + marketing channels. Keep in sync with the
+// leads.source CHECK constraint (migration 0002) and the UI dropdowns.
+const LEAD_SOURCES = ["manual", "csv", "demo", "booking", "call", "google", "linkedin", "meta", "email", "sms", "web"];
 function validSource(s) {
-  return ["manual", "csv", "demo", "booking", "call"].includes(s);
+  return LEAD_SOURCES.includes(s);
 }
 
 async function handleCreateLead(session, env, req) {
@@ -563,6 +566,9 @@ async function handleImport(session, env, req) {
     .first();
   if (!first) return err("No stages configured", 500);
 
+  // Imported leads default to "csv" but the importer may pick any valid source.
+  const importSource = validSource(body.source) ? body.source : "csv";
+
   const stmts = [];
   let imported = 0;
   for (const row of body.rows) {
@@ -584,7 +590,7 @@ async function handleImport(session, env, req) {
         row.company || null,
         row.email || null,
         row.phone || null,
-        "csv",
+        importSource,
         valueCents,
         row.notes || null,
         ts,
@@ -734,10 +740,8 @@ async function handleDashboard(session, env) {
   )
     .bind(t, ...closed)
     .all();
-  const sources = ["manual", "csv", "demo", "booking", "call"].map((s) => ({
-    source: s,
-    count: src.find((r) => r.source === s)?.c || 0,
-  }));
+  // Data-driven so any source (incl. new marketing channels) shows up.
+  const sources = src.map((r) => ({ source: r.source, count: r.c }));
 
   // Weekly time-series (last 8 weeks). wk 0 = this week … 7 = 7 weeks ago.
   const { results: wc } = await env.DB.prepare(

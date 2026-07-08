@@ -230,7 +230,8 @@ function relTime(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
-const SOURCE_COLORS = { manual: "#6366f1", csv: "#34d399", demo: "#fbbf24", booking: "#a5b4fc", call: "#f472b6" };
+const SOURCE_COLORS = { manual: "#6366f1", csv: "#34d399", demo: "#fbbf24", booking: "#a5b4fc", call: "#f472b6", google: "#60a5fa", linkedin: "#0a66c2", meta: "#a78bfa", email: "#f59e0b", sms: "#22d3ee", web: "#94a3b8" };
+const sourceColor = (s) => SOURCE_COLORS[s] || "#94a3b8";
 
 function renderDashboard(d) {
   renderKpiRow(d.kpis);
@@ -326,7 +327,7 @@ function renderSource(sources) {
     .filter((s) => s.count > 0)
     .map((s) => {
       const len = (s.count / total) * circ;
-      const seg = `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="${SOURCE_COLORS[s.source]}" stroke-width="${sw}" stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 ${C} ${C})"/>`;
+      const seg = `<circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="${sourceColor(s.source)}" stroke-width="${sw}" stroke-dasharray="${len.toFixed(2)} ${(circ - len).toFixed(2)}" stroke-dashoffset="${(-offset).toFixed(2)}" transform="rotate(-90 ${C} ${C})"/>`;
       offset += len;
       return seg;
     })
@@ -338,7 +339,7 @@ function renderSource(sources) {
      <text x="${C}" y="${C + 12}" text-anchor="middle" fill="#9aa3c7" font-size="7">OPEN</text>
    </svg>`;
   const legend = `<div class="source-legend">` + sources
-    .map((s) => `<div class="row"><span class="lname"><span class="swatch" style="background:${SOURCE_COLORS[s.source]}"></span>${s.source}</span><span>${s.count}</span></div>`)
+    .map((s) => `<div class="row"><span class="lname"><span class="swatch" style="background:${sourceColor(s.source)}"></span>${s.source}</span><span>${s.count}</span></div>`)
     .join("") + `</div>`;
   el.innerHTML = `<div class="source-wrap">${donut}${legend}</div>`;
 }
@@ -628,7 +629,7 @@ $("confirmImport").onclick = async () => {
   try {
     const data = await api("/api/leads/import", {
       method: "POST",
-      body: JSON.stringify({ rows: STATE.parsedRows }),
+      body: JSON.stringify({ rows: STATE.parsedRows, source: $("i-source").value }),
     });
     closeOverlay("importOverlay");
     await load();
