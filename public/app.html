@@ -52,9 +52,18 @@
 
     <!-- Pipeline tab -->
     <section id="pipelineView" class="hidden">
+      <div class="board-toolbar">
+        <label class="select-all"><input type="checkbox" id="selectAll"> Select all</label>
+        <span class="sel-count" id="selCount"></span>
+        <span class="toolbar-spacer"></span>
+        <button class="btn ghost sm hidden" id="exportSelected" type="button">Export selected</button>
+        <button class="btn ghost sm" id="exportAll" type="button">Export all</button>
+      </div>
       <div class="board" id="board"><div class="empty">Loading…</div></div>
     </section>
   </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <!-- Add lead modal -->
   <div class="overlay center hidden" id="addOverlay">
@@ -111,6 +120,15 @@
           <label>Add note</label>
           <textarea id="d-note-input" rows="2" placeholder="Log a call, a reply…"></textarea>
           <button class="btn ghost sm" id="d-add-note" style="margin-top:8px;">Add note</button>
+        </div>
+      </div>
+
+      <div class="danger-zone" style="margin-top:22px;padding-top:16px;border-top:1px solid var(--border);">
+        <button class="btn danger sm" id="d-delete" type="button">Delete lead</button>
+        <div id="d-delete-confirm" class="hidden" style="margin-top:10px;">
+          <div style="font-size:13px;margin-bottom:8px;">Delete lead? This can't be undone.</div>
+          <button class="btn danger sm" id="d-delete-yes" type="button">Yes, delete</button>
+          <button class="btn ghost sm" id="d-delete-no" type="button">Cancel</button>
         </div>
       </div>
     </div>

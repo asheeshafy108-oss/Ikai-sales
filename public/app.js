@@ -105,9 +105,14 @@ function renderStageList() {
     .join("");
 }
 
+const SELECTED = new Set(); // lead ids currently selected on the board
+
 function renderBoard() {
   const board = $("board");
   if (!STATE.stages.length) { board.innerHTML = '<div class="empty">No stages.</div>'; return; }
+  // drop any selected ids whose lead no longer exists
+  const liveIds = new Set(STATE.leads.map((l) => l.id));
+  for (const id of [...SELECTED]) if (!liveIds.has(id)) SELECTED.delete(id);
   board.innerHTML = STATE.stages
     .map((stage) => {
       const leads = STATE.leads.filter((l) => l.stage_id === stage.id);
@@ -128,11 +133,67 @@ function renderBoard() {
 
   board.querySelectorAll(".card").forEach((c) => {
     c.querySelector(".open-lead").onclick = () => openDrawer(c.dataset.id);
+    const chk = c.querySelector(".lead-check");
+    if (chk) {
+      chk.checked = SELECTED.has(c.dataset.id);
+      chk.onclick = (e) => e.stopPropagation();
+      chk.onchange = () => {
+        if (chk.checked) SELECTED.add(c.dataset.id); else SELECTED.delete(c.dataset.id);
+        updateSelectionUI();
+      };
+    }
     const prev = c.querySelector(".move-prev");
     const next = c.querySelector(".move-next");
     if (prev) prev.onclick = (e) => { e.stopPropagation(); moveLead(c.dataset.id, -1); };
     if (next) next.onclick = (e) => { e.stopPropagation(); moveLead(c.dataset.id, 1); };
   });
+  updateSelectionUI();
+}
+
+// ---------- selection + export ----------
+function updateSelectionUI() {
+  const n = SELECTED.size;
+  const total = STATE.leads.length;
+  $("selCount").textContent = n ? `${n} selected` : "";
+  $("exportSelected").classList.toggle("hidden", n === 0);
+  $("exportAll").disabled = total === 0;
+  const all = $("selectAll");
+  all.checked = total > 0 && n === total;
+  all.indeterminate = n > 0 && n < total;
+}
+
+$("selectAll").onchange = () => {
+  const check = $("selectAll").checked;
+  SELECTED.clear();
+  if (check) STATE.leads.forEach((l) => SELECTED.add(l.id));
+  document.querySelectorAll(".lead-check").forEach((cb) => { cb.checked = check; });
+  updateSelectionUI();
+};
+
+async function runExport(payload, btn) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = "Exporting…";
+  try {
+    const data = await api("/api/leads/export", { method: "POST", body: JSON.stringify(payload) });
+    showToast(`Export sent to ${data.email}`);
+    // clear selection after a selected-export
+    if (!payload.all) { SELECTED.clear(); document.querySelectorAll(".lead-check").forEach((cb) => (cb.checked = false)); updateSelectionUI(); }
+  } catch (err) {
+    showToast(err.message || "Export failed", true);
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+$("exportSelected").onclick = () => runExport({ lead_ids: [...SELECTED] }, $("exportSelected"));
+$("exportAll").onclick = () => runExport({ all: true }, $("exportAll"));
+
+let toastTimer = null;
+function showToast(text, isError) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = "toast show" + (isError ? " error" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 4500);
 }
 
 function cardHtml(lead, stage) {
@@ -141,6 +202,7 @@ function cardHtml(lead, stage) {
   const canNext = idx < STATE.stages.length - 1;
   return `
     <div class="card" data-id="${lead.id}">
+      <label class="lead-select" title="Select lead"><input type="checkbox" class="lead-check" data-id="${lead.id}"></label>
       <div class="open-lead">
         <div class="lead-name">${escapeHtml(lead.name)}</div>
         ${lead.company ? `<div class="lead-company">${escapeHtml(lead.company)}</div>` : ""}
@@ -373,6 +435,9 @@ async function openDrawer(id) {
   $("d-notes").value = lead.notes || "";
   $("d-note-input").value = "";
   renderEvents(events);
+  // reset the delete control to its default (un-confirmed) state
+  $("d-delete").classList.remove("hidden");
+  $("d-delete-confirm").classList.add("hidden");
   openOverlay("drawerOverlay");
 }
 
@@ -432,6 +497,30 @@ $("d-add-note").onclick = async () => {
     if (dashboardVisible()) loadDashboard().catch(() => {});
   } catch (err) {
     showMsg($("d-msg"), err.message);
+  }
+};
+
+// delete lead (two-step inline confirm — no browser dialog)
+$("d-delete").onclick = () => {
+  $("d-delete").classList.add("hidden");
+  $("d-delete-confirm").classList.remove("hidden");
+};
+$("d-delete-no").onclick = () => {
+  $("d-delete-confirm").classList.add("hidden");
+  $("d-delete").classList.remove("hidden");
+};
+$("d-delete-yes").onclick = async () => {
+  clearMsg($("d-msg"));
+  try {
+    await api(`/api/leads/${currentLeadId}`, { method: "DELETE" });
+    STATE.leads = STATE.leads.filter((l) => l.id !== currentLeadId);
+    renderBoard();
+    closeOverlay("drawerOverlay");
+    if (dashboardVisible()) loadDashboard().catch(() => {});
+  } catch (err) {
+    showMsg($("d-msg"), err.message);
+    // re-show the confirm buttons so the user can retry or cancel
+    $("d-delete-confirm").classList.remove("hidden");
   }
 };
 

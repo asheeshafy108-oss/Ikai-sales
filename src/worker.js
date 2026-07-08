@@ -355,6 +355,108 @@ async function handleGetLead(session, env, id) {
   return json({ lead, events });
 }
 
+async function handleDeleteLead(session, env, id) {
+  // Tenant-scoped: only the owning tenant can delete, and only its own lead.
+  // A non-existent id or another tenant's id both fail the same way (404).
+  const lead = await env.DB.prepare(`SELECT id FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  if (!lead) return err("Lead not found", 404);
+  // Cascade to the lead's events, then remove the lead. batch() is atomic in D1.
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM lead_events WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
+    env.DB.prepare(`DELETE FROM leads WHERE id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
+  ]);
+  return json({ ok: true });
+}
+
+// POST /api/leads/export  { lead_ids: [...] } | { all: true }
+// Emails a CSV of the chosen (tenant-scoped) leads to the logged-in user.
+async function handleExportLeads(session, env, req) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const all = body.all === true;
+  const ids = Array.isArray(body.lead_ids) ? body.lead_ids.filter((x) => typeof x === "string") : [];
+  if (!all && ids.length === 0) return err("No leads selected", 400);
+
+  // Stage id -> name (tenant-scoped), for the "stage" column.
+  const { results: stages } = await env.DB
+    .prepare(`SELECT id, name FROM stages WHERE tenant_id = ?`)
+    .bind(session.tenant_id)
+    .all();
+  const stageName = Object.fromEntries(stages.map((s) => [s.id, s.name]));
+
+  // Only ever read this tenant's leads; then narrow to the selected ids in JS
+  // (avoids IN(...) param limits and silently ignores any foreign/unknown id).
+  const { results: allLeads } = await env.DB
+    .prepare(`SELECT * FROM leads WHERE tenant_id = ? ORDER BY updated_at DESC`)
+    .bind(session.tenant_id)
+    .all();
+  const leads = all ? allLeads : allLeads.filter((l) => ids.includes(l.id));
+  if (leads.length === 0) return err("No matching leads to export", 400);
+
+  const csv = buildLeadsCsv(leads, stageName);
+  const filename = `ikai-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+  const to = session.user.email;
+
+  const result = await sendCsvEmail(env, to, filename, csv, leads.length);
+  if (!result.ok) return err(result.error || "Failed to send export email", 502);
+  return json({ ok: true, count: leads.length, email: to });
+}
+
+// RFC-4180 quoting + CSV-injection guard (prefix =,+,-,@ with a single quote).
+function csvCell(v) {
+  let s = v == null ? "" : String(v);
+  if (/^[=+\-@]/.test(s)) s = "'" + s;
+  if (/[",\n\r]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function buildLeadsCsv(leads, stageName) {
+  const headers = ["name", "company", "email", "phone", "source", "stage", "value", "notes", "created_at", "updated_at", "id"];
+  const lines = [headers.join(",")];
+  for (const l of leads) {
+    const value = l.value_cents != null ? (l.value_cents / 100).toFixed(2) : "";
+    const cells = [l.name, l.company, l.email, l.phone, l.source, stageName[l.stage_id] || "", value, l.notes, l.created_at, l.updated_at, l.id];
+    lines.push(cells.map(csvCell).join(","));
+  }
+  return lines.join("\r\n");
+}
+
+// base64 of a UTF-8 string (Workers-safe: encode bytes, then btoa a binary string).
+function toBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+async function sendCsvEmail(env, to, filename, csv, count) {
+  if (!env.RESEND_API_KEY) {
+    console.error("[export] RESEND_API_KEY is not configured");
+    return { ok: false, error: "Email isn't configured yet — set RESEND_API_KEY." };
+  }
+  const n = `${count} lead${count === 1 ? "" : "s"}`;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: `ikai Sales <${env.FROM_EMAIL}>`,
+      to: [to],
+      subject: `Your ikai leads export (${n})`,
+      text: `Attached is your export of ${n} from ikai Sales.\nFile: ${filename}`,
+      html: `<p>Attached is your export of <b>${n}</b> from ikai Sales.</p><p>File: ${filename}</p>`,
+      attachments: [{ filename, content: toBase64(csv) }],
+    }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error(`[export] Resend ${res.status}: ${detail}`);
+    return { ok: false, status: res.status, error: `Couldn't send the export (Resend ${res.status}).` };
+  }
+  return { ok: true };
+}
+
 async function handlePatchLead(session, env, id, req) {
   const body = await req.json().catch(() => null);
   if (!body) return err("Invalid request body");
@@ -744,12 +846,15 @@ export default {
         return await handleCreateLead(session, env, req);
       if (path === "/api/leads/import" && method === "POST")
         return await handleImport(session, env, req);
+      if (path === "/api/leads/export" && method === "POST")
+        return await handleExportLeads(session, env, req);
 
       const leadMatch = path.match(/^\/api\/leads\/([^/]+)$/);
       if (leadMatch) {
         const id = leadMatch[1];
         if (method === "GET") return await handleGetLead(session, env, id);
         if (method === "PATCH") return await handlePatchLead(session, env, id, req);
+        if (method === "DELETE") return await handleDeleteLead(session, env, id);
       }
 
       const noteMatch = path.match(/^\/api\/leads\/([^/]+)\/notes$/);

@@ -11,7 +11,8 @@
     "not_found_handling": "none"
   },
   "vars": {
-    "APP_URL": "https://app.ikai.com.au"
+    "APP_URL": "https://app.ikai.com.au",
+    "FROM_EMAIL": "noreply@ikai.com.au"
   },
   "routes": [
     { "pattern": "app.ikai.com.au", "custom_domain": true }
