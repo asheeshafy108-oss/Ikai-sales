@@ -1,8 +1,9 @@
 {
   "name": "ikai-sales",
-  "account_id": "cebd2c2d41f211a3f65977a59bf3944c",
+  "account_id": "9f64f47f767d08fcd928b4eaddc75471",
   "main": "src/worker.js",
   "compatibility_date": "2025-01-01",
+  "workers_dev": true,
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -10,13 +11,16 @@
     "not_found_handling": "none"
   },
   "vars": {
-    "APP_URL": "https://ikai-sales.quiet-voice-b676.workers.dev"
+    "APP_URL": "https://app.ikai.com.au"
   },
+  "routes": [
+    { "pattern": "app.ikai.com.au", "custom_domain": true }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "ikai-sales-db",
-      "database_id": "2d9bd3ab-bbbc-45fa-84a0-cb7d37bc9fcd",
+      "database_id": "e60e9945-74ea-4b62-9779-961d579e35af",
       "migrations_dir": "migrations"
     }
   ]
