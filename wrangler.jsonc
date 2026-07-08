@@ -1,0 +1,23 @@
+{
+  "name": "ikai-sales",
+  "account_id": "cebd2c2d41f211a3f65977a59bf3944c",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "vars": {
+    "APP_URL": "https://ikai-sales.quiet-voice-b676.workers.dev"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ikai-sales-db",
+      "database_id": "2d9bd3ab-bbbc-45fa-84a0-cb7d37bc9fcd",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

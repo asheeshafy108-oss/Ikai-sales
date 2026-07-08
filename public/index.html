@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ikai · Sales</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <!-- Login view -->
+      <div id="loginView">
+        <h1><span class="brand">ikai</span> Sales</h1>
+        <p class="sub">Sign in to your dashboard.</p>
+        <form id="loginForm">
+          <label for="li-email">Email</label>
+          <input id="li-email" type="email" autocomplete="email" required />
+          <label for="li-password">Password</label>
+          <input id="li-password" type="password" autocomplete="current-password" required />
+          <button class="btn block" type="submit">Sign in</button>
+        </form>
+        <div class="msg" id="loginMsg"></div>
+        <div class="toggle-row">
+          New here? <span class="link" id="showRegister">Register your business</span>
+        </div>
+      </div>
+
+      <!-- Register view -->
+      <div id="registerView" class="hidden">
+        <h1>Register your <span class="brand">business</span></h1>
+        <p class="sub">Create your workspace — you'll be the owner.</p>
+        <form id="registerForm">
+          <label for="rg-business">Business name</label>
+          <input id="rg-business" type="text" required />
+          <label for="rg-name">Your name</label>
+          <input id="rg-name" type="text" autocomplete="name" required />
+          <label for="rg-email">Email</label>
+          <input id="rg-email" type="email" autocomplete="email" required />
+          <label for="rg-password">Password</label>
+          <input id="rg-password" type="password" autocomplete="new-password" minlength="8" required />
+          <button class="btn block" type="submit">Create workspace</button>
+        </form>
+        <div class="msg" id="registerMsg"></div>
+        <div class="toggle-row">
+          Already have an account? <span class="link" id="showLogin">Sign in</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const show = (el, msg, ok) => { el.className = "msg " + (ok ? "ok" : "error"); el.textContent = msg; };
+
+    $("showRegister").onclick = () => { $("loginView").classList.add("hidden"); $("registerView").classList.remove("hidden"); };
+    $("showLogin").onclick = () => { $("registerView").classList.add("hidden"); $("loginView").classList.remove("hidden"); };
+
+    async function post(url, body) {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      return { ok: r.ok, status: r.status, data };
+    }
+
+    $("loginForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector("button");
+      btn.disabled = true;
+      const { ok, data } = await post("/api/auth/login", {
+        email: $("li-email").value,
+        password: $("li-password").value,
+      });
+      btn.disabled = false;
+      if (ok) location.href = "/app";
+      else show($("loginMsg"), data.error || "Sign in failed");
+    };
+
+    $("registerForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector("button");
+      btn.disabled = true;
+      const { ok, data } = await post("/api/auth/register", {
+        business_name: $("rg-business").value,
+        name: $("rg-name").value,
+        email: $("rg-email").value,
+        password: $("rg-password").value,
+      });
+      btn.disabled = false;
+      if (ok) location.href = "/app";
+      else show($("registerMsg"), data.error || "Registration failed");
+    };
+  </script>
+</body>
+</html>

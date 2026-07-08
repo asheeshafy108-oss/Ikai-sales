@@ -1,0 +1,22 @@
+{
+  "name": "ikai-sales",
+  "version": "1.0.0",
+  "main": "src/worker.js",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8787",
+    "deploy": "wrangler deploy",
+    "migrate:local": "wrangler d1 migrations apply ikai-sales-db --local",
+    "migrate:remote": "wrangler d1 migrations apply ikai-sales-db --remote",
+    "test:api": "node test/run.mjs",
+    "test:dashboard": "node test/dashboard.mjs",
+    "test:ui": "node test/ui.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "ikai sales dashboard — multi-tenant Cloudflare Worker + D1",
+  "devDependencies": {
+    "puppeteer-core": "^24.43.1",
+    "wrangler": "^4.86.0"
+  }
+}

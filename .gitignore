@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+*.log
+.DS_Store
+ikai-sales-backup.sql
+ikai-sales-clean.sql
+.dev.vars

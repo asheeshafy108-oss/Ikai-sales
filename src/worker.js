@@ -1,0 +1,764 @@
+// ikai-sales Worker — all API routes. Multi-tenant, tenant-scoped everywhere.
+
+// ---------- small utils ----------
+const enc = new TextEncoder();
+
+function uuid() {
+  return crypto.randomUUID();
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function addDaysISO(days) {
+  return new Date(Date.now() + days * 86400_000).toISOString();
+}
+
+function json(data, status = 200, headers = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function err(message, status = 400) {
+  return json({ error: message }, status);
+}
+
+function toHex(buf) {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randHex(bytes = 32) {
+  const b = new Uint8Array(bytes);
+  crypto.getRandomValues(b);
+  return toHex(b);
+}
+
+async function sha256Hex(str) {
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(str));
+  return toHex(digest);
+}
+
+// ---------- password crypto (PBKDF2-SHA256, 100k) ----------
+const PBKDF2_ITER = 100_000;
+
+async function pbkdf2(password, saltHex, iterations) {
+  const salt = Uint8Array.from(saltHex.match(/../g).map((h) => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, [
+    "deriveBits",
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    key,
+    256,
+  );
+  return toHex(bits);
+}
+
+async function hashPassword(password) {
+  const saltHex = randHex(16);
+  const hash = await pbkdf2(password, saltHex, PBKDF2_ITER);
+  return `${PBKDF2_ITER}:${saltHex}:${hash}`;
+}
+
+// constant-time string compare (hex strings of equal length)
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
+
+async function verifyPassword(password, stored) {
+  const parts = String(stored).split(":");
+  if (parts.length !== 3) return false;
+  const [iterStr, saltHex, hash] = parts;
+  const computed = await pbkdf2(password, saltHex, parseInt(iterStr, 10));
+  return timingSafeEqual(computed, hash);
+}
+
+// ---------- cookies ----------
+function parseCookies(req) {
+  const out = {};
+  const raw = req.headers.get("cookie");
+  if (!raw) return out;
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx > -1) out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+function sessionCookie(token, req, maxAgeSec = 30 * 86400) {
+  const secure = new URL(req.url).protocol === "https:" ? " Secure;" : "";
+  return `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSec};${secure}`;
+}
+
+function clearCookie(req) {
+  const secure = new URL(req.url).protocol === "https:" ? " Secure;" : "";
+  return `sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0;${secure}`;
+}
+
+// ---------- auth ----------
+// Returns { user, tenant_id } or null. Every data query hangs off this.
+async function getSession(req, env) {
+  const token = parseCookies(req).sid;
+  if (!token) return null;
+  const tokenHash = await sha256Hex(token);
+  const row = await env.DB.prepare(
+    `SELECT u.id, u.tenant_id, u.email, u.name, u.role, s.expires_at
+       FROM sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ?`,
+  )
+    .bind(tokenHash)
+    .first();
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    await env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(tokenHash).run();
+    return null;
+  }
+  return {
+    user: { id: row.id, email: row.email, name: row.name, role: row.role },
+    tenant_id: row.tenant_id,
+  };
+}
+
+// ---------- route handlers ----------
+async function seedStages(env, tenantId) {
+  const names = ["New", "Contacted", "Consult booked", "Proposal", "Won", "Lost"];
+  const stmts = names.map((name, i) =>
+    env.DB.prepare(`INSERT INTO stages (id, tenant_id, name, position) VALUES (?,?,?,?)`).bind(
+      uuid(),
+      tenantId,
+      name,
+      i,
+    ),
+  );
+  await env.DB.batch(stmts);
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function handleRegister(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const businessName = (body.business_name || "").trim();
+  const name = (body.name || "").trim();
+  const email = (body.email || "").trim().toLowerCase();
+  const password = body.password || "";
+  if (!businessName || !name || !email || !password) return err("All fields are required");
+  if (!EMAIL_RE.test(email)) return err("Invalid email address");
+  if (password.length < 8) return err("Password must be at least 8 characters");
+
+  const existing = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(email).first();
+  if (existing) return err("An account with that email already exists", 409);
+
+  const tenantId = uuid();
+  const userId = uuid();
+  const passwordHash = await hashPassword(password);
+  const ts = nowISO();
+
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO tenants (id, name, created_at) VALUES (?,?,?)`).bind(
+      tenantId,
+      businessName,
+      ts,
+    ),
+    env.DB.prepare(
+      `INSERT INTO users (id, tenant_id, email, name, role, password_hash, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).bind(userId, tenantId, email, name, "owner", passwordHash, ts),
+  ]);
+  await seedStages(env, tenantId);
+
+  return startSession(env, req, userId);
+}
+
+async function startSession(env, req, userId) {
+  const token = randHex(32);
+  const tokenHash = await sha256Hex(token);
+  await env.DB.prepare(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?,?,?)`)
+    .bind(tokenHash, userId, addDaysISO(30))
+    .run();
+  return json({ ok: true }, 200, { "set-cookie": sessionCookie(token, req) });
+}
+
+async function handleLogin(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const email = (body.email || "").trim().toLowerCase();
+  const password = body.password || "";
+  if (!email || !password) return err("Email and password are required");
+
+  // rate limit: 5 attempts / 15 min per email
+  const windowStart = new Date(Date.now() - 15 * 60_000).toISOString();
+  const { count } = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM login_attempts WHERE email = ? AND ts > ?`,
+  )
+    .bind(email, windowStart)
+    .first();
+  if (count >= 5) return err("Too many attempts. Try again in 15 minutes.", 429);
+
+  const user = await env.DB.prepare(
+    `SELECT id, password_hash FROM users WHERE email = ?`,
+  )
+    .bind(email)
+    .first();
+
+  const ok = user ? await verifyPassword(password, user.password_hash) : false;
+  if (!ok) {
+    await env.DB.prepare(`INSERT INTO login_attempts (email, ts) VALUES (?,?)`)
+      .bind(email, nowISO())
+      .run();
+    return err("Invalid email or password", 401);
+  }
+
+  // success: clear attempts for this email
+  await env.DB.prepare(`DELETE FROM login_attempts WHERE email = ?`).bind(email).run();
+  return startSession(env, req, user.id);
+}
+
+async function handleLogout(req, env) {
+  const token = parseCookies(req).sid;
+  if (token) {
+    const tokenHash = await sha256Hex(token);
+    await env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(tokenHash).run();
+  }
+  return json({ ok: true }, 200, { "set-cookie": clearCookie(req) });
+}
+
+async function handleMe(session, env) {
+  const tenant = await env.DB.prepare(`SELECT id, name FROM tenants WHERE id = ?`)
+    .bind(session.tenant_id)
+    .first();
+  return json({ user: session.user, tenant, role: session.user.role });
+}
+
+async function handleGetStages(session, env) {
+  const { results } = await env.DB.prepare(
+    `SELECT id, name, position FROM stages WHERE tenant_id = ? ORDER BY position`,
+  )
+    .bind(session.tenant_id)
+    .all();
+  return json({ stages: results });
+}
+
+async function handleGetLeads(session, env) {
+  const { results: stages } = await env.DB.prepare(
+    `SELECT id, name, position FROM stages WHERE tenant_id = ? ORDER BY position`,
+  )
+    .bind(session.tenant_id)
+    .all();
+  // stage_since = timestamp the lead entered its current stage (last stage_change, else created).
+  const { results: leads } = await env.DB.prepare(
+    `SELECT l.id, l.stage_id, l.name, l.company, l.email, l.phone, l.source, l.value_cents,
+            l.notes, l.created_at, l.updated_at,
+            COALESCE(
+              (SELECT MAX(e.created_at) FROM lead_events e
+                WHERE e.lead_id = l.id AND e.type = 'stage_change' AND e.to_stage = l.stage_id),
+              l.created_at
+            ) AS stage_since
+       FROM leads l WHERE l.tenant_id = ? ORDER BY l.updated_at DESC`,
+  )
+    .bind(session.tenant_id)
+    .all();
+  return json({ stages, leads });
+}
+
+function validSource(s) {
+  return ["manual", "csv", "demo", "booking", "call"].includes(s);
+}
+
+async function handleCreateLead(session, env, req) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const name = (body.name || "").trim();
+  if (!name) return err("Lead name is required");
+  const source = validSource(body.source) ? body.source : "manual";
+
+  // stage must belong to this tenant; default to first stage
+  let stageId = body.stage_id;
+  const stage = stageId
+    ? await env.DB.prepare(`SELECT id FROM stages WHERE id = ? AND tenant_id = ?`)
+        .bind(stageId, session.tenant_id)
+        .first()
+    : null;
+  if (!stage) {
+    const first = await env.DB.prepare(
+      `SELECT id FROM stages WHERE tenant_id = ? ORDER BY position LIMIT 1`,
+    )
+      .bind(session.tenant_id)
+      .first();
+    if (!first) return err("No stages configured", 500);
+    stageId = first.id;
+  }
+
+  const id = uuid();
+  const ts = nowISO();
+  const valueCents = normalizeValueCents(body.value_cents, body.value);
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO leads (id, tenant_id, stage_id, name, company, email, phone, source,
+                          value_cents, notes, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).bind(
+      id,
+      session.tenant_id,
+      stageId,
+      name,
+      body.company || null,
+      body.email || null,
+      body.phone || null,
+      source,
+      valueCents,
+      body.notes || null,
+      ts,
+      ts,
+    ),
+    env.DB.prepare(
+      `INSERT INTO lead_events (id, lead_id, tenant_id, type, to_stage, actor_user_id, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).bind(uuid(), id, session.tenant_id, "created", stageId, session.user.id, ts),
+  ]);
+
+  const lead = await env.DB.prepare(`SELECT * FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  return json({ lead }, 201);
+}
+
+function normalizeValueCents(valueCents, value) {
+  if (valueCents !== undefined && valueCents !== null && valueCents !== "") {
+    const n = Math.round(Number(valueCents));
+    return Number.isFinite(n) ? n : null;
+  }
+  if (value !== undefined && value !== null && value !== "") {
+    const n = Math.round(Number(value) * 100);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+async function handleGetLead(session, env, id) {
+  const lead = await env.DB.prepare(`SELECT * FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  if (!lead) return err("Lead not found", 404);
+  const { results: events } = await env.DB.prepare(
+    `SELECT id, type, from_stage, to_stage, note, actor_user_id, created_at
+       FROM lead_events WHERE lead_id = ? AND tenant_id = ? ORDER BY created_at ASC`,
+  )
+    .bind(id, session.tenant_id)
+    .all();
+  return json({ lead, events });
+}
+
+async function handlePatchLead(session, env, id, req) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const lead = await env.DB.prepare(`SELECT * FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  if (!lead) return err("Lead not found", 404);
+
+  const ts = nowISO();
+  const stmts = [];
+
+  // stage change → validate stage belongs to tenant, write event
+  let newStageId = lead.stage_id;
+  if (body.stage_id && body.stage_id !== lead.stage_id) {
+    const stage = await env.DB.prepare(`SELECT id FROM stages WHERE id = ? AND tenant_id = ?`)
+      .bind(body.stage_id, session.tenant_id)
+      .first();
+    if (!stage) return err("Invalid stage", 400);
+    newStageId = body.stage_id;
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO lead_events (id, lead_id, tenant_id, type, from_stage, to_stage, actor_user_id, created_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      ).bind(
+        uuid(),
+        id,
+        session.tenant_id,
+        "stage_change",
+        lead.stage_id,
+        newStageId,
+        session.user.id,
+        ts,
+      ),
+    );
+  }
+
+  const fields = {
+    name: body.name !== undefined ? String(body.name).trim() : lead.name,
+    company: body.company !== undefined ? body.company || null : lead.company,
+    email: body.email !== undefined ? body.email || null : lead.email,
+    phone: body.phone !== undefined ? body.phone || null : lead.phone,
+    notes: body.notes !== undefined ? body.notes || null : lead.notes,
+    stage_id: newStageId,
+    value_cents:
+      body.value_cents !== undefined || body.value !== undefined
+        ? normalizeValueCents(body.value_cents, body.value)
+        : lead.value_cents,
+  };
+  if (!fields.name) return err("Lead name cannot be empty");
+
+  stmts.unshift(
+    env.DB.prepare(
+      `UPDATE leads SET name=?, company=?, email=?, phone=?, notes=?, stage_id=?, value_cents=?, updated_at=?
+        WHERE id=? AND tenant_id=?`,
+    ).bind(
+      fields.name,
+      fields.company,
+      fields.email,
+      fields.phone,
+      fields.notes,
+      fields.stage_id,
+      fields.value_cents,
+      ts,
+      id,
+      session.tenant_id,
+    ),
+  );
+
+  await env.DB.batch(stmts);
+  const updated = await env.DB.prepare(`SELECT * FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  return json({ lead: updated });
+}
+
+async function handleAddNote(session, env, id, req) {
+  const body = await req.json().catch(() => null);
+  const note = (body && body.note ? String(body.note) : "").trim();
+  if (!note) return err("Note is required");
+  const lead = await env.DB.prepare(`SELECT id FROM leads WHERE id = ? AND tenant_id = ?`)
+    .bind(id, session.tenant_id)
+    .first();
+  if (!lead) return err("Lead not found", 404);
+  const ts = nowISO();
+  await env.DB.prepare(
+    `INSERT INTO lead_events (id, lead_id, tenant_id, type, note, actor_user_id, created_at)
+     VALUES (?,?,?,?,?,?,?)`,
+  )
+    .bind(uuid(), id, session.tenant_id, "note", note, session.user.id, ts)
+    .run();
+  await env.DB.prepare(`UPDATE leads SET updated_at=? WHERE id=? AND tenant_id=?`)
+    .bind(ts, id, session.tenant_id)
+    .run();
+  return json({ ok: true }, 201);
+}
+
+async function handleImport(session, env, req) {
+  const body = await req.json().catch(() => null);
+  if (!body || !Array.isArray(body.rows)) return err("rows[] required");
+  const first = await env.DB.prepare(
+    `SELECT id FROM stages WHERE tenant_id = ? ORDER BY position LIMIT 1`,
+  )
+    .bind(session.tenant_id)
+    .first();
+  if (!first) return err("No stages configured", 500);
+
+  const stmts = [];
+  let imported = 0;
+  for (const row of body.rows) {
+    const name = (row.name || "").trim();
+    if (!name) continue; // skip nameless rows
+    const id = uuid();
+    const ts = nowISO();
+    const valueCents = normalizeValueCents(undefined, row.value);
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO leads (id, tenant_id, stage_id, name, company, email, phone, source,
+                            value_cents, notes, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).bind(
+        id,
+        session.tenant_id,
+        first.id,
+        name,
+        row.company || null,
+        row.email || null,
+        row.phone || null,
+        "csv",
+        valueCents,
+        row.notes || null,
+        ts,
+        ts,
+      ),
+    );
+    stmts.push(
+      env.DB.prepare(
+        `INSERT INTO lead_events (id, lead_id, tenant_id, type, to_stage, actor_user_id, created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).bind(uuid(), id, session.tenant_id, "created", first.id, session.user.id, ts),
+    );
+    imported++;
+  }
+  if (stmts.length) await env.DB.batch(stmts);
+  return json({ imported });
+}
+
+async function handleCreateInvite(session, env, req) {
+  if (session.user.role !== "owner") return err("Only owners can create invites", 403);
+  const token = randHex(32);
+  const tokenHash = await sha256Hex(token);
+  await env.DB.prepare(
+    `INSERT INTO invites (token_hash, tenant_id, role, created_by, expires_at)
+     VALUES (?,?,?,?,?)`,
+  )
+    .bind(tokenHash, session.tenant_id, "member", session.user.id, addDaysISO(7))
+    .run();
+  const link = `${env.APP_URL}/join?token=${token}`;
+  return json({ link, expires_at: addDaysISO(7) }, 201);
+}
+
+async function handleJoin(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const token = (body.token || "").trim();
+  const name = (body.name || "").trim();
+  const password = body.password || "";
+  const email = (body.email || "").trim().toLowerCase();
+  if (!token || !name || !password || !email) return err("All fields are required");
+  if (!EMAIL_RE.test(email)) return err("Invalid email address");
+  if (password.length < 8) return err("Password must be at least 8 characters");
+
+  const tokenHash = await sha256Hex(token);
+  const invite = await env.DB.prepare(
+    `SELECT tenant_id, role, expires_at, used_at FROM invites WHERE token_hash = ?`,
+  )
+    .bind(tokenHash)
+    .first();
+  if (!invite) return err("Invalid invite link", 404);
+  if (invite.used_at) return err("This invite has already been used", 410);
+  if (new Date(invite.expires_at).getTime() < Date.now()) return err("This invite has expired", 410);
+
+  const existing = await env.DB.prepare(`SELECT id FROM users WHERE email = ?`).bind(email).first();
+  if (existing) return err("An account with that email already exists", 409);
+
+  const userId = uuid();
+  const ts = nowISO();
+  const passwordHash = await hashPassword(password);
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO users (id, tenant_id, email, name, role, password_hash, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).bind(userId, invite.tenant_id, email, name, invite.role, passwordHash, ts),
+    env.DB.prepare(`UPDATE invites SET used_at = ? WHERE token_hash = ?`).bind(ts, tokenHash),
+  ]);
+  return startSession(env, req, userId);
+}
+
+// ---------- dashboard aggregates ----------
+async function handleDashboard(session, env) {
+  const t = session.tenant_id;
+  const { results: stages } = await env.DB.prepare(
+    `SELECT id, name, position FROM stages WHERE tenant_id = ? ORDER BY position`,
+  )
+    .bind(t)
+    .all();
+  const won = stages.find((s) => s.name.toLowerCase() === "won");
+  const lost = stages.find((s) => s.name.toLowerCase() === "lost");
+  const closed = [won?.id, lost?.id].filter(Boolean);
+  const ph = closed.map(() => "?").join(",");
+  const notClosed = closed.length ? `AND stage_id NOT IN (${ph})` : "";
+  const notClosedL = closed.length ? `AND l.stage_id NOT IN (${ph})` : "";
+
+  // Funnel: count + value per stage (all leads).
+  const { results: grp } = await env.DB.prepare(
+    `SELECT stage_id, COUNT(*) c, COALESCE(SUM(value_cents),0) v
+       FROM leads WHERE tenant_id = ? GROUP BY stage_id`,
+  )
+    .bind(t)
+    .all();
+  const gmap = {};
+  grp.forEach((r) => (gmap[r.stage_id] = { count: r.c, value: r.v }));
+  const funnel = stages.map((s) => ({
+    stage_id: s.id,
+    name: s.name,
+    count: gmap[s.id]?.count || 0,
+    value: gmap[s.id]?.value || 0,
+  }));
+
+  // Open pipeline (stages not Won/Lost).
+  const openRow = await env.DB.prepare(
+    `SELECT COUNT(*) c, COALESCE(SUM(value_cents),0) v FROM leads WHERE tenant_id = ? ${notClosed}`,
+  )
+    .bind(t, ...closed)
+    .first();
+
+  // Leads added: last 30d vs previous 30d.
+  const added = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN julianday(created_at) >= julianday('now','-30 days') THEN 1 ELSE 0 END) a30,
+       SUM(CASE WHEN julianday(created_at) >= julianday('now','-60 days')
+                 AND julianday(created_at) <  julianday('now','-30 days') THEN 1 ELSE 0 END) aprev
+     FROM leads WHERE tenant_id = ?`,
+  )
+    .bind(t)
+    .first();
+
+  // Won this month / last month (from stage_change events to Won).
+  let wonThis = { c: 0, v: 0 };
+  let wonLast = { c: 0 };
+  if (won) {
+    wonThis = await env.DB.prepare(
+      `SELECT COUNT(*) c, COALESCE(SUM(l.value_cents),0) v
+         FROM lead_events e JOIN leads l ON l.id = e.lead_id
+        WHERE e.tenant_id = ? AND e.type = 'stage_change' AND e.to_stage = ?
+          AND julianday(e.created_at) >= julianday(date('now','start of month'))`,
+    )
+      .bind(t, won.id)
+      .first();
+    wonLast = await env.DB.prepare(
+      `SELECT COUNT(*) c FROM lead_events e
+        WHERE e.tenant_id = ? AND e.type = 'stage_change' AND e.to_stage = ?
+          AND julianday(e.created_at) >= julianday(date('now','start of month','-1 month'))
+          AND julianday(e.created_at) <  julianday(date('now','start of month'))`,
+    )
+      .bind(t, won.id)
+      .first();
+  }
+
+  const wonAll = won ? gmap[won.id]?.count || 0 : 0;
+  const lostAll = lost ? gmap[lost.id]?.count || 0 : 0;
+
+  // Source breakdown (open leads only).
+  const { results: src } = await env.DB.prepare(
+    `SELECT source, COUNT(*) c FROM leads WHERE tenant_id = ? ${notClosed} GROUP BY source`,
+  )
+    .bind(t, ...closed)
+    .all();
+  const sources = ["manual", "csv", "demo", "booking", "call"].map((s) => ({
+    source: s,
+    count: src.find((r) => r.source === s)?.c || 0,
+  }));
+
+  // Weekly time-series (last 8 weeks). wk 0 = this week … 7 = 7 weeks ago.
+  const { results: wc } = await env.DB.prepare(
+    `SELECT CAST((julianday('now') - julianday(created_at)) / 7 AS INT) wk, COUNT(*) c
+       FROM leads WHERE tenant_id = ? AND julianday(created_at) >= julianday('now','-56 days')
+      GROUP BY wk`,
+  )
+    .bind(t)
+    .all();
+  let ww = [];
+  if (won) {
+    const r = await env.DB.prepare(
+      `SELECT CAST((julianday('now') - julianday(created_at)) / 7 AS INT) wk, COUNT(*) c
+         FROM lead_events
+        WHERE tenant_id = ? AND type = 'stage_change' AND to_stage = ?
+          AND julianday(created_at) >= julianday('now','-56 days')
+        GROUP BY wk`,
+    )
+      .bind(t, won.id)
+      .all();
+    ww = r.results;
+  }
+  const created8 = Array(8).fill(0);
+  const won8 = Array(8).fill(0);
+  wc.forEach((r) => { if (r.wk >= 0 && r.wk < 8) created8[7 - r.wk] += r.c; });
+  ww.forEach((r) => { if (r.wk >= 0 && r.wk < 8) won8[7 - r.wk] += r.c; });
+
+  // Stale open leads: no lead_events in 7+ days.
+  const { results: stale } = await env.DB.prepare(
+    `SELECT l.id, l.name, l.stage_id,
+            MAX(e.created_at) last_event,
+            CAST(julianday('now') - julianday(MAX(e.created_at)) AS INT) days_silent
+       FROM leads l JOIN lead_events e ON e.lead_id = l.id
+      WHERE l.tenant_id = ? ${notClosedL}
+      GROUP BY l.id
+     HAVING julianday(MAX(e.created_at)) < julianday('now','-7 days')
+      ORDER BY last_event ASC LIMIT 25`,
+  )
+    .bind(t, ...closed)
+    .all();
+
+  // Activity feed: last 15 events with lead + actor names.
+  const { results: activity } = await env.DB.prepare(
+    `SELECT e.type, e.from_stage, e.to_stage, e.note, e.created_at,
+            l.name lead_name, u.name actor_name
+       FROM lead_events e JOIN leads l ON l.id = e.lead_id
+       LEFT JOIN users u ON u.id = e.actor_user_id
+      WHERE e.tenant_id = ? ORDER BY e.created_at DESC LIMIT 15`,
+  )
+    .bind(t)
+    .all();
+
+  return json({
+    stages,
+    kpis: {
+      open_value_cents: openRow.v,
+      open_count: openRow.c,
+      leads_added_30: added.a30 || 0,
+      leads_added_prev_30: added.aprev || 0,
+      won_this_month_count: wonThis.c || 0,
+      won_this_month_value: wonThis.v || 0,
+      won_last_month_count: wonLast.c || 0,
+      won_all: wonAll,
+      lost_all: lostAll,
+    },
+    funnel,
+    sources,
+    weekly: { created: created8, won: won8 },
+    stale,
+    activity,
+  });
+}
+
+// ---------- router ----------
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    const path = url.pathname;
+
+    if (!path.startsWith("/api/")) {
+      // Static assets (index.html, join.html, app.html, css, js) handled by ASSETS binding.
+      return env.ASSETS.fetch(req);
+    }
+
+    try {
+      const method = req.method;
+
+      // Public auth routes
+      if (path === "/api/auth/register" && method === "POST") return await handleRegister(req, env);
+      if (path === "/api/auth/login" && method === "POST") return await handleLogin(req, env);
+      if (path === "/api/auth/logout" && method === "POST") return await handleLogout(req, env);
+      if (path === "/api/join" && method === "POST") return await handleJoin(req, env);
+
+      // Everything below requires a valid session.
+      const session = await getSession(req, env);
+      if (!session) return err("Unauthorized", 401);
+
+      if (path === "/api/me" && method === "GET") return await handleMe(session, env);
+      if (path === "/api/stages" && method === "GET") return await handleGetStages(session, env);
+      if (path === "/api/dashboard" && method === "GET") return await handleDashboard(session, env);
+      if (path === "/api/invites" && method === "POST")
+        return await handleCreateInvite(session, env, req);
+
+      if (path === "/api/leads" && method === "GET") return await handleGetLeads(session, env);
+      if (path === "/api/leads" && method === "POST")
+        return await handleCreateLead(session, env, req);
+      if (path === "/api/leads/import" && method === "POST")
+        return await handleImport(session, env, req);
+
+      const leadMatch = path.match(/^\/api\/leads\/([^/]+)$/);
+      if (leadMatch) {
+        const id = leadMatch[1];
+        if (method === "GET") return await handleGetLead(session, env, id);
+        if (method === "PATCH") return await handlePatchLead(session, env, id, req);
+      }
+
+      const noteMatch = path.match(/^\/api\/leads\/([^/]+)\/notes$/);
+      if (noteMatch && method === "POST")
+        return await handleAddNote(session, env, noteMatch[1], req);
+
+      return err("Not found", 404);
+    } catch (e) {
+      return err("Internal error: " + (e && e.message ? e.message : String(e)), 500);
+    }
+  },
+};

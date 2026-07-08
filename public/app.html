@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard · ikai Sales</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="tenant"><span class="brand">ikai</span> · <span id="tenantName">…</span></div>
+    <nav class="tabs">
+      <button class="tab active" id="tabDashboard" data-tab="dashboard">Dashboard</button>
+      <button class="tab" id="tabPipeline" data-tab="pipeline">Pipeline</button>
+    </nav>
+    <div class="spacer"></div>
+    <button class="btn" id="addLeadBtn">+ Add lead</button>
+    <button class="btn ghost sm" id="importBtn">Import CSV</button>
+    <button class="btn ghost sm" id="settingsBtn">Settings</button>
+    <button class="btn ghost sm" id="logoutBtn">Logout</button>
+  </header>
+
+  <main>
+    <!-- Dashboard tab -->
+    <section id="dashboardView">
+      <div class="kpi-row" id="kpiRow"></div>
+      <div class="dash-grid">
+        <div class="panel">
+          <h3 class="panel-title">Funnel</h3>
+          <div id="funnelChart"></div>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">Pipeline flow · last 8 weeks</h3>
+          <div id="flowChart"></div>
+          <div class="legend" id="flowLegend"></div>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">Open leads by source</h3>
+          <div id="sourceChart"></div>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">Stale leads · silent 7+ days</h3>
+          <div id="staleList"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h3 class="panel-title">Recent activity</h3>
+        <div id="activityFeed"></div>
+      </div>
+    </section>
+
+    <!-- Pipeline tab -->
+    <section id="pipelineView" class="hidden">
+      <div class="board" id="board"><div class="empty">Loading…</div></div>
+    </section>
+  </main>
+
+  <!-- Add lead modal -->
+  <div class="overlay center hidden" id="addOverlay">
+    <div class="modal">
+      <div class="modal-head"><h2>Add lead</h2><button class="close-x" data-close="addOverlay">×</button></div>
+      <form id="addForm">
+        <div class="grid2">
+          <div><label>Name *</label><input id="a-name" required /></div>
+          <div><label>Company</label><input id="a-company" /></div>
+          <div><label>Email</label><input id="a-email" type="email" /></div>
+          <div><label>Phone</label><input id="a-phone" /></div>
+          <div>
+            <label>Source</label>
+            <select id="a-source">
+              <option value="manual">Manual</option>
+              <option value="csv">CSV</option>
+              <option value="demo">Demo</option>
+              <option value="booking">Booking</option>
+              <option value="call">Call</option>
+            </select>
+          </div>
+          <div><label>Stage</label><select id="a-stage"></select></div>
+          <div><label>Value ($)</label><input id="a-value" type="number" step="0.01" min="0" /></div>
+        </div>
+        <label>Notes</label>
+        <textarea id="a-notes" rows="3"></textarea>
+        <button class="btn block" type="submit">Create lead</button>
+      </form>
+      <div class="msg" id="addMsg"></div>
+    </div>
+  </div>
+
+  <!-- Lead drawer -->
+  <div class="overlay right hidden" id="drawerOverlay">
+    <div class="drawer">
+      <div class="drawer-head"><h2 id="d-title">Lead</h2><button class="close-x" data-close="drawerOverlay">×</button></div>
+      <div class="grid2">
+        <div><label>Name</label><input id="d-name" /></div>
+        <div><label>Company</label><input id="d-company" /></div>
+        <div><label>Email</label><input id="d-email" /></div>
+        <div><label>Phone</label><input id="d-phone" /></div>
+        <div><label>Stage</label><select id="d-stage"></select></div>
+        <div><label>Value ($)</label><input id="d-value" type="number" step="0.01" min="0" /></div>
+      </div>
+      <label>Notes</label>
+      <textarea id="d-notes" rows="3"></textarea>
+      <button class="btn block" id="d-save">Save changes</button>
+      <div class="msg" id="d-msg"></div>
+
+      <div class="timeline">
+        <h3>Timeline</h3>
+        <div id="d-events"></div>
+        <div class="field-row" style="margin-top:12px;">
+          <label>Add note</label>
+          <textarea id="d-note-input" rows="2" placeholder="Log a call, a reply…"></textarea>
+          <button class="btn ghost sm" id="d-add-note" style="margin-top:8px;">Add note</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div class="overlay center hidden" id="settingsOverlay">
+    <div class="modal">
+      <div class="modal-head"><h2>Settings</h2><button class="close-x" data-close="settingsOverlay">×</button></div>
+
+      <div class="settings-section" id="inviteSection">
+        <h3>Team invites</h3>
+        <p class="sub" style="margin:6px 0 0;">Generate a single-use link (valid 7 days). Anyone with the link joins as a member.</p>
+        <button class="btn sm" id="genInvite" style="margin-top:10px;">Generate invite link</button>
+        <div class="copy-link hidden" id="inviteResult">
+          <input id="inviteLink" readonly />
+          <button class="btn ghost sm" id="copyInvite">Copy</button>
+        </div>
+        <div class="msg" id="inviteMsg"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Stages</h3>
+        <ul class="stage-list" id="stageList"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- CSV import modal -->
+  <div class="overlay center hidden" id="importOverlay">
+    <div class="modal">
+      <div class="modal-head"><h2>Import CSV</h2><button class="close-x" data-close="importOverlay">×</button></div>
+      <p class="sub" style="margin:0 0 12px;">Columns: <code>name,company,email,phone,value,notes</code>. First row may be a header.</p>
+      <input type="file" id="csvFile" accept=".csv,text/csv" />
+      <div class="csv-preview" id="csvPreview"></div>
+      <button class="btn block hidden" id="confirmImport">Import <span id="importCount"></span> leads</button>
+      <div class="msg" id="importMsg"></div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
