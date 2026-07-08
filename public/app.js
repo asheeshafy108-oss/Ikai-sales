@@ -209,7 +209,7 @@ function cardHtml(lead, stage) {
         <div class="lead-name">${escapeHtml(lead.name)}</div>
         ${lead.company ? `<div class="lead-company">${escapeHtml(lead.company)}</div>` : ""}
         <div class="lead-row">
-          <span class="${sourceChipClass(lead.source)}">${escapeHtml(lead.source)}</span>
+          <span class="chip" style="color:${sourceColor(lead.source)};border-color:${sourceColor(lead.source)}59;background:${sourceColor(lead.source)}1a">${escapeHtml(lead.source)}</span>
           <span class="lead-value">${money(lead.value_cents)}</span>
         </div>
         <div class="days">In stage ${daysSince(lead.stage_since || lead.created_at)}</div>
@@ -232,8 +232,15 @@ function relTime(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
-const SOURCE_COLORS = { manual: "#6366f1", csv: "#34d399", demo: "#fbbf24", booking: "#a5b4fc", call: "#f472b6", google: "#60a5fa", linkedin: "#0a66c2", meta: "#a78bfa", email: "#f59e0b", sms: "#22d3ee", web: "#94a3b8" };
-const sourceColor = (s) => SOURCE_COLORS[s] || "#94a3b8";
+const SOURCE_COLORS = { manual: "#6366f1", csv: "#0d9488", demo: "#d97706", booking: "#818cf8", call: "#db2777", web: "#64748b",
+  google: "#1a73e8", linkedin: "#0a66c2", meta: "#7c3aed", email: "#d97706", sms: "#0d9488" };
+const sourceColor = (s) => SOURCE_COLORS[s] || "#64748b";
+
+// chart palette — read from the CSS theme vars so the light/dark swap lives in :root
+const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const CHART_TRACK = cssVar("--chart-track") || "#edf1f9";
+const CHART_GRID = cssVar("--chart-grid") || "#dfe4f0";
+const CHART_AXIS = cssVar("--chart-axis") || "#616d8c";
 
 function renderDashboard(d) {
   renderKpiRow(d.kpis);
@@ -277,7 +284,7 @@ function renderFunnel(funnel) {
       return `<div class="funnel-row">
         <div class="funnel-label" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
         <svg class="bar" viewBox="0 0 100 16" preserveAspectRatio="none">
-          <rect x="0" y="0" width="100" height="16" fill="#1b2342"/>
+          <rect x="0" y="0" width="100" height="16" fill="${CHART_TRACK}"/>
           <rect x="0" y="0" width="${pct.toFixed(2)}" height="16" fill="#6366f1"/>
         </svg>
         <div class="funnel-val"><b>${f.count}</b> · ${money(f.value)}</div>
@@ -300,22 +307,22 @@ function renderFlow(weekly) {
     return `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts}"/>${dots}`;
   };
   const grid = `
-    <line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#26305a" stroke-width="1"/>
-    <line x1="${padL}" y1="${y(maxVal)}" x2="${W - padR}" y2="${y(maxVal)}" stroke="#26305a" stroke-width="0.5" stroke-dasharray="3 3"/>
-    <text x="2" y="${(y(maxVal) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">${maxVal}</text>
-    <text x="2" y="${(y(0) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">0</text>`;
+    <line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="${CHART_GRID}" stroke-width="1"/>
+    <line x1="${padL}" y1="${y(maxVal)}" x2="${W - padR}" y2="${y(maxVal)}" stroke="${CHART_GRID}" stroke-width="0.5" stroke-dasharray="3 3"/>
+    <text x="2" y="${(y(maxVal) + 3).toFixed(1)}" fill="${CHART_AXIS}" font-size="8">${maxVal}</text>
+    <text x="2" y="${(y(0) + 3).toFixed(1)}" fill="${CHART_AXIS}" font-size="8">0</text>`;
   const xlabels = created
     .map((_, i) => {
       const weeksAgo = n - 1 - i;
       const lbl = weeksAgo === 0 ? "now" : `-${weeksAgo}w`;
       return i % 2 === 0 || i === n - 1
-        ? `<text x="${x(i).toFixed(1)}" y="${H - 6}" fill="#9aa3c7" font-size="8" text-anchor="middle">${lbl}</text>`
+        ? `<text x="${x(i).toFixed(1)}" y="${H - 6}" fill="${CHART_AXIS}" font-size="8" text-anchor="middle">${lbl}</text>`
         : "";
     })
     .join("");
-  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">${grid}${line(created, "#6366f1")}${line(won, "#a5b4fc")}${xlabels}</svg>`;
+  el.innerHTML = `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">${grid}${line(created, "#6366f1")}${line(won, "#818cf8")}${xlabels}</svg>`;
   $("flowLegend").innerHTML = totalActivity
-    ? `<span><span class="dot" style="background:#6366f1"></span>Created</span><span><span class="dot" style="background:#a5b4fc"></span>Won</span>`
+    ? `<span><span class="dot" style="background:#6366f1"></span>Created</span><span><span class="dot" style="background:#818cf8"></span>Won</span>`
     : `<span>No leads created or won in the last 8 weeks.</span>`;
 }
 
@@ -335,10 +342,10 @@ function renderSource(sources) {
     })
     .join("");
   const donut = `<svg width="100" height="100" viewBox="0 0 100 100" style="flex:0 0 auto">
-     <circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="#1b2342" stroke-width="${sw}"/>
+     <circle cx="${C}" cy="${C}" r="${R}" fill="none" stroke="${CHART_TRACK}" stroke-width="${sw}"/>
      ${segs}
      <text x="${C}" y="${C - 1}" text-anchor="middle" fill="#e6e8f2" font-size="20" font-weight="700">${total}</text>
-     <text x="${C}" y="${C + 12}" text-anchor="middle" fill="#9aa3c7" font-size="7">OPEN</text>
+     <text x="${C}" y="${C + 12}" text-anchor="middle" fill="${CHART_AXIS}" font-size="7">OPEN</text>
    </svg>`;
   const legend = `<div class="source-legend">` + sources
     .map((s) => `<div class="row"><span class="lname"><span class="swatch" style="background:${sourceColor(s.source)}"></span>${s.source}</span><span>${s.count}</span></div>`)
@@ -528,7 +535,27 @@ $("d-delete-yes").onclick = async () => {
 };
 
 // ---------- settings ----------
-$("settingsBtn").onclick = () => { clearMsg($("inviteMsg")); $("inviteResult").classList.add("hidden"); openOverlay("settingsOverlay"); };
+$("settingsBtn").onclick = () => {
+  clearMsg($("inviteMsg"));
+  $("inviteResult").classList.add("hidden");
+  clearMsg($("budgetMsg"));
+  openOverlay("settingsOverlay");
+  api("/api/marketing/config").then((c) => { $("s-budget").value = Number(c.daily_budget_aud).toFixed(2); }).catch(() => {});
+};
+$("saveBudget").onclick = async () => {
+  clearMsg($("budgetMsg"));
+  const v = parseFloat($("s-budget").value);
+  if (!Number.isFinite(v) || v < 0) { showMsg($("budgetMsg"), "Enter a valid amount (0 or more)."); return; }
+  try {
+    const c = await api("/api/marketing/config", { method: "PUT", body: JSON.stringify({ daily_budget_aud: v }) });
+    $("s-budget").value = Number(c.daily_budget_aud).toFixed(2);
+    showMsg($("budgetMsg"), `Saved · daily budget ${audMoney(c.daily_budget_aud)}`, true);
+    // refresh the Google tab budget cards if it's been rendered
+    if (STATE.googleData && !STATE.googleData.error) { STATE.googleData.budget = { dailyBudget: c.daily_budget_aud, mtdBudget: c.mtdBudget, daysElapsed: c.daysElapsed }; renderBudget(STATE.googleData); }
+  } catch (e) {
+    showMsg($("budgetMsg"), e.message || "Couldn't save.");
+  }
+};
 $("genInvite").onclick = async () => {
   clearMsg($("inviteMsg"));
   try {
@@ -655,7 +682,14 @@ async function loadMarketing() {
 }
 
 function showChannel(name) {
-  document.querySelectorAll("#channelTabs .subtab").forEach((b) => b.classList.toggle("active", b.dataset.channel === name));
+  document.querySelectorAll("#channelTabs .subtab").forEach((b) => {
+    const on = b.dataset.channel === name;
+    b.classList.toggle("active", on);
+    // active channel tab underlines + colours in its own accent (overview -> indigo)
+    const accent = on && name !== "overview" ? sourceColor(name) : "";
+    b.style.borderBottomColor = accent;
+    b.style.color = on && accent ? accent : "";
+  });
   ["overview", "google", "linkedin", "meta", "email", "sms"].forEach((c) => $("ch-" + c).classList.toggle("hidden", c !== name));
   if (name === "google") loadGoogle();
 }
@@ -684,10 +718,10 @@ function lineChart(values, color) {
   const y = (v) => padT + (1 - v / max) * (H - padT - padB);
   const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const dots = values.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2" fill="${color}"/>`).join("");
-  const grid = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="#26305a" stroke-width="1"/>
-    <line x1="${padL}" y1="${y(max)}" x2="${W - padR}" y2="${y(max)}" stroke="#26305a" stroke-width="0.5" stroke-dasharray="3 3"/>
-    <text x="2" y="${(y(max) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">${max}</text>
-    <text x="2" y="${(y(0) + 3).toFixed(1)}" fill="#9aa3c7" font-size="8">0</text>`;
+  const grid = `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" stroke="${CHART_GRID}" stroke-width="1"/>
+    <line x1="${padL}" y1="${y(max)}" x2="${W - padR}" y2="${y(max)}" stroke="${CHART_GRID}" stroke-width="0.5" stroke-dasharray="3 3"/>
+    <text x="2" y="${(y(max) + 3).toFixed(1)}" fill="${CHART_AXIS}" font-size="8">${max}</text>
+    <text x="2" y="${(y(0) + 3).toFixed(1)}" fill="${CHART_AXIS}" font-size="8">0</text>`;
   return `<svg class="chart-svg" viewBox="0 0 ${W} ${H}">${grid}<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts}"/>${dots}</svg>`;
 }
 
@@ -699,13 +733,14 @@ function barRows(rows, color, empty) {
     const pct = (r.value / max) * 100;
     return `<div class="funnel-row">
       <div class="funnel-label" title="${escapeHtml(r.label)}">${escapeHtml(r.label)}</div>
-      <svg class="bar" viewBox="0 0 100 16" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="16" fill="#1b2342"/><rect x="0" y="0" width="${pct.toFixed(2)}" height="16" fill="${color || "#6366f1"}"/></svg>
+      <svg class="bar" viewBox="0 0 100 16" preserveAspectRatio="none"><rect x="0" y="0" width="100" height="16" fill="${CHART_TRACK}"/><rect x="0" y="0" width="${pct.toFixed(2)}" height="16" fill="${color || "#6366f1"}"/></svg>
       <div class="funnel-val"><b>${r.value}</b>${r.sub ? " · " + r.sub : ""}</div>
     </div>`;
   }).join("");
 }
 
 function renderOverview(o) {
+  STATE.overviewData = o;
   const label = { google: "Google", linkedin: "LinkedIn", meta: "Meta", email: "Email", sms: "SMS" };
   const cell = (v) => (v == null ? '<span class="muted">—</span>' : v.toLocaleString());
   $("ov-channels").innerHTML =
@@ -720,28 +755,145 @@ function renderOverview(o) {
     : '<div class="panel-empty">No leads created in the last 30 days.</div>';
 }
 
-function renderGoogleError(msg) {
+const audMoney = (v) => "$" + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function renderBudget(g) {
+  const b = g.budget || { dailyBudget: 12, mtdBudget: 12, daysElapsed: 1 };
+  $("g-budget").innerHTML =
+    kpiCard("Daily budget", audMoney(b.dailyBudget), "AUD · set in Settings") +
+    kpiCard("Month-to-date budget", audMoney(b.mtdBudget), `${b.daysElapsed} day${b.daysElapsed === 1 ? "" : "s"} × ${audMoney(b.dailyBudget)}`) +
+    kpiCard("Spend", "—", "Connect Google Ads", "ph");
+}
+
+function renderGoogleError(msg, g) {
   $("g-error").innerHTML = `<div class="error-card"><b>Google Analytics didn't load.</b><div>${escapeHtml(msg)}</div></div>`;
-  $("g-kpis").innerHTML = ""; $("g-events").innerHTML = "";
+  $("g-events").innerHTML = '<div class="panel-empty">—</div>';
+  $("g-kpis").innerHTML = "";
   $("g-daily").innerHTML = '<div class="panel-empty">—</div>';
   $("g-sourcemedium").innerHTML = '<div class="panel-empty">—</div>';
   $("g-asof").textContent = "";
+  renderBudget(g || {}); // budget still shows even when GA4 is down
 }
 
 function renderGoogle(g) {
-  if (g.error && g.sessions == null) { renderGoogleError(g.error); return; }
+  STATE.googleData = g;
+  if (g.error && g.sessions == null) { renderGoogleError(g.error, g); return; }
   $("g-error").innerHTML = "";
   $("g-asof").textContent = (g.stale ? "Cached · " : "") + "data as of " + fmtTime(g.fetchedAt);
+  // Campaign conversions — the two demo conversions are the hero
+  const evLabel = { demo_link_requested: "Demo link requests", demo_onboarding_complete: "Onboarding completes", demo_book_click: "Book-a-consult clicks" };
+  const hero = { demo_link_requested: 1, demo_onboarding_complete: 1 };
+  $("g-events").innerHTML = Object.keys(evLabel).map((k) => {
+    const e = g.keyEvents[k] || { cur: 0, prev: 0 };
+    return kpiCard(evLabel[k], e.cur.toLocaleString(), `vs ${e.prev} prior · ${deltaHtml(e.cur, e.prev)}`, hero[k] ? "hero" : "");
+  }).join("");
+  renderBudget(g);
+  // Traffic
   $("g-kpis").innerHTML =
     kpiCard("Sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`) +
     kpiCard("Engaged sessions", g.engagedSessions.cur.toLocaleString(), `vs ${g.engagedSessions.prev} prior · ${deltaHtml(g.engagedSessions.cur, g.engagedSessions.prev)}`);
-  const evLabel = { demo_link_requested: "Demo link requested", demo_onboarding_complete: "Onboarding complete", demo_book_click: "Book-a-consult clicks" };
-  $("g-events").innerHTML = Object.keys(evLabel).map((k) => {
-    const e = g.keyEvents[k] || { cur: 0, prev: 0 };
-    return kpiCard(evLabel[k], e.cur.toLocaleString(), `vs ${e.prev} prior · ${deltaHtml(e.cur, e.prev)}`);
-  }).join("");
-  $("g-daily").innerHTML = lineChart((g.daily || []).map((d) => d.sessions), "#6366f1");
-  $("g-sourcemedium").innerHTML = barRows((g.sourceMedium || []).map((s) => ({ label: s.sourceMedium, value: s.sessions })), "#a5b4fc", "No session data.");
+  $("g-daily").innerHTML = lineChart((g.daily || []).map((d) => d.sessions), sourceColor("google"));
+  $("g-sourcemedium").innerHTML = barRows((g.sourceMedium || []).map((s) => ({ label: s.sourceMedium, value: s.sessions })), sourceColor("google"), "No session data.");
+}
+
+// ---------- Ask ikai assistant ----------
+$("askFab").onclick = () => {
+  const p = $("askPanel");
+  p.classList.toggle("hidden");
+  if (!p.classList.contains("hidden")) $("askInput").focus();
+};
+$("askClose").onclick = () => $("askPanel").classList.add("hidden");
+
+function appendAsk(role, text) {
+  const b = $("askBody");
+  const hint = b.querySelector(".ask-hint");
+  if (hint) hint.remove();
+  const m = document.createElement("div");
+  m.className = "ask-msg " + role;
+  m.textContent = text;
+  b.appendChild(m);
+  b.scrollTop = b.scrollHeight;
+  return m;
+}
+
+$("askForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const q = $("askInput").value.trim();
+  if (!q) return;
+  $("askInput").value = "";
+  appendAsk("user", q);
+  const bubble = appendAsk("assistant thinking", "Thinking…");
+  $("askSend").disabled = true;
+  try {
+    const data = await api("/api/assistant", { method: "POST", body: JSON.stringify({ question: q, context: serialiseVisibleData() }) });
+    bubble.textContent = data.answer || "(no answer)";
+    bubble.className = "ask-msg assistant";
+  } catch (err) {
+    bubble.textContent = err.message || "Something went wrong.";
+    bubble.className = "ask-msg assistant ask-error";
+  } finally {
+    $("askSend").disabled = false;
+    $("askBody").scrollTop = $("askBody").scrollHeight;
+  }
+};
+
+// Serialise whatever the user is currently looking at — one entry point, each
+// view contributes its own slice (KPIs, table rows, chart series).
+function serialiseVisibleData() {
+  const tab = !$("dashboardView").classList.contains("hidden") ? "dashboard"
+    : !$("pipelineView").classList.contains("hidden") ? "pipeline"
+    : "marketing";
+  const out = { activeTab: tab };
+  if (STATE.me && STATE.me.tenant) out.workspace = STATE.me.tenant.name;
+  if (tab === "dashboard") out.dashboard = serialiseDashboard();
+  else if (tab === "pipeline") out.pipeline = serialisePipeline();
+  else out.marketing = serialiseMarketing();
+  return out;
+}
+
+function serialiseDashboard() {
+  const d = STATE.dashboard;
+  if (!d) return { note: "dashboard data not loaded" };
+  return { period: "last 30 days where applicable", kpis: d.kpis, funnelByStage: d.funnel, openLeadsBySource: d.sources, staleLeads7dPlus: d.stale ? d.stale.length : undefined };
+}
+
+function serialisePipeline() {
+  const stages = STATE.stages.map((s) => {
+    const leads = STATE.leads.filter((l) => l.stage_id === s.id);
+    return { stage: s.name, leadCount: leads.length, totalValueAud: leads.reduce((x, l) => x + (l.value_cents || 0), 0) / 100 };
+  });
+  return {
+    stages,
+    totalLeads: STATE.leads.length,
+    leads: STATE.leads.slice(0, 40).map((l) => ({ name: l.name, company: l.company, source: l.source, stage: stageName(l.stage_id), valueAud: l.value_cents != null ? l.value_cents / 100 : null })),
+  };
+}
+
+function serialiseMarketing() {
+  const active = document.querySelector("#channelTabs .subtab.active");
+  const channel = active ? active.dataset.channel : "overview";
+  const m = { channelTab: channel };
+  const g = STATE.googleData;
+  if (channel === "google" && g && g.sessions) {
+    m.google = {
+      period: "last 30 days",
+      campaignConversions: {
+        "Demo link requests": g.keyEvents.demo_link_requested ? g.keyEvents.demo_link_requested.cur : null,
+        "Onboarding completes": g.keyEvents.demo_onboarding_complete ? g.keyEvents.demo_onboarding_complete.cur : null,
+        "Book-a-consult clicks": g.keyEvents.demo_book_click ? g.keyEvents.demo_book_click.cur : null,
+      },
+      budget: g.budget ? { dailyBudgetAud: g.budget.dailyBudget, monthToDateBudgetAud: g.budget.mtdBudget, daysElapsed: g.budget.daysElapsed, spend: "not connected — Google Ads, Phase 2" } : undefined,
+      sessions: g.sessions.cur,
+      sessionsPrior30d: g.sessions.prev,
+      engagedSessions: g.engagedSessions.cur,
+      sessionsBySourceMedium: (g.sourceMedium || []).slice(0, 10),
+      dataAsOf: g.fetchedAt,
+    };
+  } else if (channel === "overview" && STATE.overviewData) {
+    m.overview = { period: "last 30 days", channels: STATE.overviewData.channels, leadsBySource: STATE.overviewData.leadsBySource };
+  } else {
+    m.note = channel + " is not connected yet — there is no data for it on screen.";
+  }
+  return m;
 }
 
 // ---------- logout ----------

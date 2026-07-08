@@ -95,15 +95,12 @@
           <div class="data-asof" id="g-asof"></div>
         </div>
         <div id="g-error"></div>
-        <div class="kpi-row" id="g-kpis"><div class="panel-empty">Loading…</div></div>
-        <div class="section-label">Key events · last 30 days</div>
-        <div class="kpi-row" id="g-events"></div>
-        <div class="section-label">Google Ads <span class="muted-note">· connect in Phase 2</span></div>
-        <div class="kpi-row" id="g-ads">
-          <div class="kpi-card ph"><div class="k-label">Spend</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
-          <div class="kpi-card ph"><div class="k-label">Avg CPC</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
-          <div class="kpi-card ph"><div class="k-label">CTR</div><div class="k-value">—</div><div class="k-sub">Connect Google Ads</div></div>
-        </div>
+        <div class="section-label">Campaign conversions <span class="muted-note">· last 30 days</span></div>
+        <div class="kpi-row" id="g-events"><div class="panel-empty">Loading…</div></div>
+        <div class="section-label">Budget &amp; spend</div>
+        <div class="kpi-row" id="g-budget"></div>
+        <div class="section-label">Traffic <span class="muted-note">· last 30 days</span></div>
+        <div class="kpi-row" id="g-kpis"></div>
         <div class="dash-grid">
           <div class="panel"><h3 class="panel-title">Sessions · last 30 days</h3><div id="g-daily"></div></div>
           <div class="panel"><h3 class="panel-title">Sessions by source / medium</h3><div id="g-sourcemedium"></div></div>
@@ -185,6 +182,22 @@
   </main>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Ask ikai assistant -->
+  <button class="ask-fab" id="askFab" aria-label="Ask ikai"><span class="ask-fab-spark">✦</span> Ask ikai</button>
+  <div class="ask-panel hidden" id="askPanel" role="dialog" aria-label="Ask ikai assistant">
+    <div class="ask-head">
+      <div class="ask-title"><span class="ask-fab-spark">✦</span> Ask ikai</div>
+      <button class="close-x" id="askClose" aria-label="Close">×</button>
+    </div>
+    <div class="ask-body" id="askBody">
+      <div class="ask-hint">Ask about what's on this screen — e.g. <em>"what's our demo link count this month?"</em> I answer from the data currently in view.</div>
+    </div>
+    <form class="ask-form" id="askForm">
+      <input id="askInput" placeholder="Ask about this view…" autocomplete="off" />
+      <button class="btn sm" type="submit" id="askSend">Send</button>
+    </form>
+  </div>
 
   <!-- Add lead modal -->
   <div class="overlay center hidden" id="addOverlay">
@@ -275,6 +288,17 @@
           <button class="btn ghost sm" id="copyInvite">Copy</button>
         </div>
         <div class="msg" id="inviteMsg"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Marketing budget</h3>
+        <p class="sub" style="margin:6px 0 8px;">Google Ads daily budget (AUD). Drives the budget cards on Marketing → Google.</p>
+        <div class="budget-edit">
+          <span class="budget-prefix">A$</span>
+          <input id="s-budget" type="number" min="0" step="0.01" inputmode="decimal" placeholder="12.00" />
+          <button class="btn sm" id="saveBudget">Save</button>
+        </div>
+        <div class="msg" id="budgetMsg"></div>
       </div>
 
       <div class="settings-section">
