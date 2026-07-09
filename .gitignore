@@ -1,5 +1,6 @@
 node_modules/
 .wrangler/
+.claude/
 *.log
 .DS_Store
 ikai-sales-backup.sql

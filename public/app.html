@@ -25,6 +25,7 @@
   <main>
     <!-- Dashboard tab -->
     <section id="dashboardView">
+      <div id="dueTodayStrip" class="due-strip hidden"></div>
       <div class="section-label">Sales <span class="muted-note">· pipeline</span></div>
       <div class="kpi-row" id="kpiRow"></div>
       <div class="section-label">Marketing <span class="muted-note">· last 30 days</span></div>
@@ -44,7 +45,7 @@
           <div id="sourceChart"></div>
         </div>
         <div class="panel">
-          <h3 class="panel-title">Stale leads · silent 7+ days</h3>
+          <h3 class="panel-title">Stale leads · no contact 7+ days</h3>
           <div id="staleList"></div>
         </div>
       </div>
@@ -246,32 +247,74 @@
 
   <!-- Lead drawer -->
   <div class="overlay right hidden" id="drawerOverlay">
-    <div class="drawer">
+    <div class="drawer lead-view">
       <div class="drawer-head"><h2 id="d-title">Lead</h2><button class="close-x" data-close="drawerOverlay">×</button></div>
-      <div class="grid2">
-        <div><label>Name</label><input id="d-name" /></div>
-        <div><label>Company</label><input id="d-company" /></div>
-        <div><label>Email</label><input id="d-email" /></div>
-        <div><label>Phone</label><input id="d-phone" /></div>
-        <div><label>Stage</label><select id="d-stage"></select></div>
-        <div><label>Value ($)</label><input id="d-value" type="number" step="0.01" min="0" /></div>
-      </div>
-      <label>Notes</label>
-      <textarea id="d-notes" rows="3"></textarea>
-      <button class="btn block" id="d-save">Save changes</button>
-      <div class="msg" id="d-msg"></div>
 
-      <div class="timeline">
-        <h3>Timeline</h3>
-        <div id="d-events"></div>
-        <div class="field-row" style="margin-top:12px;">
-          <label>Add note</label>
-          <textarea id="d-note-input" rows="2" placeholder="Log a call, a reply…"></textarea>
-          <button class="btn ghost sm" id="d-add-note" style="margin-top:8px;">Add note</button>
+      <!-- CONTACT -->
+      <div class="lv-section">
+        <div class="lv-head"><h3>Contact</h3><span class="lv-lastcontact" id="d-lastcontact"></span></div>
+        <div class="grid2">
+          <div><label>Name</label><input id="d-name" /></div>
+          <div><label>Company</label><input id="d-company" /></div>
+          <div>
+            <label>Email <a id="d-email-link" class="lv-link hidden">✉ email</a></label>
+            <input id="d-email" />
+          </div>
+          <div>
+            <label>Phone <a id="d-phone-link" class="lv-link hidden">☎ call</a></label>
+            <input id="d-phone" />
+          </div>
+          <div><label>Source</label><select id="d-source"></select></div>
+          <div><label>Stage</label><select id="d-stage"></select></div>
+          <div><label>Value ($)</label><input id="d-value" type="number" step="0.01" min="0" /></div>
+          <div><label>Last contacted</label><input id="d-lastcontacted" type="date" /></div>
+        </div>
+        <button class="btn block" id="d-save">Save changes</button>
+        <div class="msg" id="d-msg"></div>
+        <div class="lv-quick">
+          <button class="btn ghost sm" id="d-log-call" type="button">📞 Log call</button>
+          <button class="btn ghost sm" id="d-log-email" type="button">✉ Log email</button>
         </div>
       </div>
 
-      <div class="danger-zone" style="margin-top:22px;padding-top:16px;border-top:1px solid var(--border);">
+      <!-- NOTES -->
+      <div class="lv-section">
+        <h3>Notes</h3>
+        <textarea id="d-note-input" rows="2" placeholder="Add a note…"></textarea>
+        <button class="btn ghost sm" id="d-add-note" style="margin-top:8px;">Add note</button>
+        <div id="d-notes-thread" class="lv-thread"></div>
+      </div>
+
+      <!-- REMINDERS -->
+      <div class="lv-section">
+        <h3>Reminders</h3>
+        <div class="lv-reminder-add">
+          <input id="d-reminder-at" type="datetime-local" />
+          <input id="d-reminder-note" placeholder="e.g. call back" />
+          <button class="btn ghost sm" id="d-add-reminder" type="button">Set reminder</button>
+        </div>
+        <div class="msg" id="d-reminder-msg"></div>
+        <div id="d-reminders" class="lv-reminders"></div>
+      </div>
+
+      <!-- ATTACHMENTS -->
+      <div class="lv-section">
+        <h3>Attachments</h3>
+        <div class="lv-upload">
+          <input id="d-file-input" type="file" />
+          <button class="btn ghost sm" id="d-upload" type="button">Upload</button>
+        </div>
+        <div class="msg" id="d-file-msg"></div>
+        <div id="d-attachments" class="lv-attachments"></div>
+      </div>
+
+      <!-- ACTIVITY -->
+      <div class="lv-section">
+        <h3>Activity</h3>
+        <div id="d-events" class="lv-activity"></div>
+      </div>
+
+      <div class="danger-zone" style="margin-top:8px;padding-top:16px;border-top:1px solid var(--border);">
         <button class="btn danger sm" id="d-delete" type="button">Delete lead</button>
         <div id="d-delete-confirm" class="hidden" style="margin-top:10px;">
           <div style="font-size:13px;margin-bottom:8px;">Delete lead? This can't be undone.</div>

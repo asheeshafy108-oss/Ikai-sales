@@ -8,6 +8,7 @@
     "migrate:local": "wrangler d1 migrations apply ikai-sales-db --local",
     "migrate:remote": "wrangler d1 migrations apply ikai-sales-db --remote",
     "test:api": "node test/run.mjs",
+    "test:files": "node test/attachment-roundtrip.mjs",
     "test:dashboard": "node test/dashboard.mjs",
     "test:ui": "node test/ui.mjs"
   },

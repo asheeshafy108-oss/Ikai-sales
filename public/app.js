@@ -230,6 +230,14 @@ function showToast(text, isError) {
   toastTimer = setTimeout(() => { t.className = "toast"; }, 4500);
 }
 
+function nextActionHtml(iso, note) {
+  const d = new Date(iso);
+  const overdue = d.getTime() < Date.now();
+  const day = d.toLocaleDateString(undefined, { weekday: "short" });
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(":00", "");
+  const label = note ? escapeHtml(note) : "Reminder";
+  return `<div class="next-action${overdue ? " overdue" : ""}" title="Next reminder">▸ ${label} · ${day} ${time}</div>`;
+}
 function cardHtml(lead, stage) {
   const idx = STATE.stages.findIndex((s) => s.id === stage.id);
   const canPrev = idx > 0;
@@ -245,6 +253,7 @@ function cardHtml(lead, stage) {
           <span class="lead-value">${money(lead.value_cents)}</span>
         </div>
         <div class="days">In stage ${daysSince(lead.stage_since || lead.created_at)}</div>
+        ${lead.next_remind_at ? nextActionHtml(lead.next_remind_at, lead.next_remind_note) : ""}
       </div>
       <div class="card-actions">
         <button class="btn ghost sm move-prev" ${canPrev ? "" : "disabled"}>◀</button>
@@ -275,12 +284,26 @@ const CHART_GRID = cssVar("--chart-grid") || "#dfe4f0";
 const CHART_AXIS = cssVar("--chart-axis") || "#616d8c";
 
 function renderDashboard(d) {
+  renderDueToday(d.dueToday || []);
   renderKpiRow(d.kpis);
   renderFunnel(d.funnel);
   renderFlow(d.weekly);
   renderSource(d.sources);
   renderStale(d.stale);
   renderActivity(d.activity);
+}
+
+function renderDueToday(due) {
+  const el = $("dueTodayStrip");
+  if (!due.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  const items = due.map((r) => {
+    const overdue = new Date(r.remind_at).getTime() < Date.now();
+    const t = new Date(r.remind_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }).replace(":00", "");
+    return `<button class="due-item${overdue ? " overdue" : ""}" data-lead="${r.lead_id}">${overdue ? "⚠ " : "⏰ "}<b>${escapeHtml(r.lead_name)}</b>${r.note ? " — " + escapeHtml(r.note) : ""} <span class="due-time">${t}</span></button>`;
+  }).join("");
+  el.innerHTML = `<div class="due-title">🔔 Due today <span class="due-count">${due.length}</span></div><div class="due-items">${items}</div>`;
+  el.querySelectorAll("[data-lead]").forEach((b) => (b.onclick = () => openDrawer(b.dataset.lead)));
 }
 
 function deltaHtml(cur, prev) {
@@ -463,38 +486,98 @@ $("addForm").onsubmit = async (e) => {
 
 // ---------- drawer ----------
 let currentLeadId = null;
+let currentLead = null;
+const SOURCE_LABELS = { manual: "Manual", csv: "CSV", demo: "Demo", booking: "Booking", call: "Call", google: "Google", linkedin: "LinkedIn", meta: "Meta", email: "Email", sms: "SMS", web: "Web" };
+
 async function openDrawer(id) {
   currentLeadId = id;
-  clearMsg($("d-msg"));
-  const { lead, events } = await api(`/api/leads/${id}`);
+  clearMsg($("d-msg")); clearMsg($("d-reminder-msg")); clearMsg($("d-file-msg"));
+  $("d-source").innerHTML = Object.keys(SOURCE_LABELS).map((s) => `<option value="${s}">${SOURCE_LABELS[s]}</option>`).join("");
+  const detail = await api(`/api/leads/${id}`);
+  renderLeadView(detail);
+  $("d-delete").classList.remove("hidden");
+  $("d-delete-confirm").classList.add("hidden");
+  openOverlay("drawerOverlay");
+  const dr = $("drawerOverlay").querySelector(".drawer"); if (dr) dr.scrollTop = 0;
+}
+
+function renderLeadView(detail) {
+  currentLead = detail;
+  const lead = detail.lead;
   $("d-title").textContent = lead.name;
   $("d-name").value = lead.name || "";
   $("d-company").value = lead.company || "";
   $("d-email").value = lead.email || "";
   $("d-phone").value = lead.phone || "";
+  $("d-source").value = lead.source || "manual";
   $("d-stage").value = lead.stage_id;
   $("d-value").value = lead.value_cents != null ? (lead.value_cents / 100) : "";
-  $("d-notes").value = lead.notes || "";
+  $("d-lastcontacted").value = lead.last_contacted ? String(lead.last_contacted).slice(0, 10) : "";
+  const em = $("d-email-link"), ph = $("d-phone-link");
+  if (lead.email) { em.href = "mailto:" + lead.email; em.classList.remove("hidden"); } else em.classList.add("hidden");
+  if (lead.phone) { ph.href = "tel:" + String(lead.phone).replace(/[^+\d]/g, ""); ph.classList.remove("hidden"); } else ph.classList.add("hidden");
+  $("d-lastcontact").textContent = lead.last_contacted ? "Last contacted " + new Date(lead.last_contacted).toLocaleDateString() : "Not contacted yet";
   $("d-note-input").value = "";
-  renderEvents(events);
-  // reset the delete control to its default (un-confirmed) state
-  $("d-delete").classList.remove("hidden");
-  $("d-delete-confirm").classList.add("hidden");
-  openOverlay("drawerOverlay");
+  renderNotes(detail.notes || []);
+  renderReminders(detail.reminders || []);
+  renderAttachments(detail.attachments || []);
+  renderEvents(detail.events || []);
+}
+
+async function refreshLead() { const fresh = await api(`/api/leads/${currentLeadId}`); renderLeadView(fresh); return fresh; }
+async function refreshLeadsList() {
+  try { const data = await api("/api/leads"); STATE.stages = data.stages; STATE.leads = data.leads; renderBoard(); } catch (e) { /* ignore */ }
+}
+
+function renderNotes(notes) {
+  if (!notes.length) { $("d-notes-thread").innerHTML = '<div class="lv-empty">No notes yet.</div>'; return; }
+  const tag = { call: "📞 Call", email: "✉ Email", system: "⚙ System" };
+  $("d-notes-thread").innerHTML = notes.map((n) => `
+    <div class="lv-note">
+      <div class="lv-note-body">${tag[n.kind] ? `<span class="lv-tag">${tag[n.kind]}</span> ` : ""}${escapeHtml(n.body)}</div>
+      <div class="lv-meta">${n.author_email ? escapeHtml(n.author_email) + " · " : ""}${new Date(n.created_at).toLocaleString()}</div>
+    </div>`).join("");
+}
+
+function renderReminders(reminders) {
+  const open = (reminders || []).filter((r) => r.status === "open");
+  if (!open.length) { $("d-reminders").innerHTML = '<div class="lv-empty">No upcoming reminders.</div>'; return; }
+  const now = Date.now();
+  $("d-reminders").innerHTML = open.map((r) => {
+    const due = new Date(r.remind_at); const overdue = due.getTime() < now;
+    return `<div class="lv-reminder${overdue ? " overdue" : ""}">
+      <div><div class="lv-reminder-when">${overdue ? "⚠ " : "⏰ "}${due.toLocaleString()}</div>${r.note ? `<div class="lv-reminder-note">${escapeHtml(r.note)}</div>` : ""}${r.sent_at ? '<div class="lv-meta">email sent</div>' : ""}</div>
+      <div class="lv-reminder-actions"><button class="btn ghost sm" data-rem-done="${r.id}">Done</button><button class="btn ghost sm" data-rem-del="${r.id}">✕</button></div>
+    </div>`;
+  }).join("");
+  $("d-reminders").querySelectorAll("[data-rem-done]").forEach((b) => (b.onclick = () => completeReminder(b.dataset.remDone)));
+  $("d-reminders").querySelectorAll("[data-rem-del]").forEach((b) => (b.onclick = () => deleteReminder(b.dataset.remDel)));
+}
+
+function fmtBytes(n) { if (n < 1024) return n + " B"; if (n < 1048576) return (n / 1024).toFixed(0) + " KB"; return (n / 1048576).toFixed(1) + " MB"; }
+function renderAttachments(atts) {
+  if (!atts.length) { $("d-attachments").innerHTML = '<div class="lv-empty">No files yet.</div>'; return; }
+  $("d-attachments").innerHTML = atts.map((a) => `
+    <div class="lv-file">
+      <div class="lv-file-info"><a href="/api/files/${a.id}" class="lv-file-name">${escapeHtml(a.filename)}</a><div class="lv-meta">${fmtBytes(a.size)} · ${new Date(a.created_at).toLocaleDateString()}</div></div>
+      <button class="btn ghost sm" data-file-del="${a.id}">✕</button>
+    </div>`).join("");
+  $("d-attachments").querySelectorAll("[data-file-del]").forEach((b) => (b.onclick = () => deleteFile(b.dataset.fileDel)));
 }
 
 function renderEvents(events) {
-  if (!events.length) { $("d-events").innerHTML = '<div style="color:var(--muted);font-size:12px;">No history yet.</div>'; return; }
-  $("d-events").innerHTML = events
-    .map((ev) => {
-      let text;
-      if (ev.type === "created") text = "Lead created in " + escapeHtml(stageName(ev.to_stage));
-      else if (ev.type === "stage_change")
-        text = `Moved ${escapeHtml(stageName(ev.from_stage))} → ${escapeHtml(stageName(ev.to_stage))}`;
-      else text = "Note: " + escapeHtml(ev.note);
-      return `<div class="event"><div>${text}</div><div class="when">${new Date(ev.created_at).toLocaleString()}</div></div>`;
-    })
-    .join("");
+  if (!events.length) { $("d-events").innerHTML = '<div class="lv-empty">No history yet.</div>'; return; }
+  $("d-events").innerHTML = events.map((ev) => {
+    let text;
+    if (ev.type === "created") text = "Lead created in " + escapeHtml(stageName(ev.to_stage)) + (ev.note ? " — " + escapeHtml(ev.note) : "");
+    else if (ev.type === "stage_change") text = `Moved ${escapeHtml(stageName(ev.from_stage))} → ${escapeHtml(stageName(ev.to_stage))}`;
+    else if (ev.type === "reminder") text = "⏰ " + escapeHtml(ev.note || "Reminder set");
+    else if (ev.type === "file") text = "📎 " + escapeHtml(ev.note || "File added");
+    else if (ev.type === "call") text = "📞 " + escapeHtml(ev.note || "Call logged");
+    else if (ev.type === "email") text = "✉ " + escapeHtml(ev.note || "Email logged");
+    else text = "📝 " + escapeHtml(ev.note || "Note");
+    return `<div class="event"><div>${text}</div><div class="when">${ev.actor_email ? escapeHtml(ev.actor_email) + " · " : ""}${new Date(ev.created_at).toLocaleString()}</div></div>`;
+  }).join("");
 }
 
 $("d-save").onclick = async () => {
@@ -503,44 +586,68 @@ $("d-save").onclick = async () => {
     const data = await api(`/api/leads/${currentLeadId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        name: $("d-name").value,
-        company: $("d-company").value,
-        email: $("d-email").value,
-        phone: $("d-phone").value,
-        stage_id: $("d-stage").value,
-        value: $("d-value").value,
-        notes: $("d-notes").value,
+        name: $("d-name").value, company: $("d-company").value, email: $("d-email").value, phone: $("d-phone").value,
+        source: $("d-source").value, stage_id: $("d-stage").value, value: $("d-value").value,
+        last_contacted: $("d-lastcontacted").value || null,
       }),
     });
     const lead = STATE.leads.find((l) => l.id === currentLeadId);
     if (lead) Object.assign(lead, data.lead);
     renderBoard();
     showMsg($("d-msg"), "Saved", true);
-    // refresh timeline (stage change may have added an event)
-    const fresh = await api(`/api/leads/${currentLeadId}`);
-    renderEvents(fresh.events);
+    await refreshLead();
     if (dashboardVisible()) loadDashboard().catch(() => {});
-  } catch (err) {
-    showMsg($("d-msg"), err.message);
-  }
+  } catch (err) { showMsg($("d-msg"), err.message); }
 };
 
-$("d-add-note").onclick = async () => {
-  const note = $("d-note-input").value.trim();
+async function addLeadNote(kind, fallback) {
+  const note = $("d-note-input").value.trim() || fallback || "";
   if (!note) return;
   clearMsg($("d-msg"));
   try {
-    await api(`/api/leads/${currentLeadId}/notes`, { method: "POST", body: JSON.stringify({ note }) });
+    await api(`/api/leads/${currentLeadId}/notes`, { method: "POST", body: JSON.stringify({ note, kind: kind || "note" }) });
     $("d-note-input").value = "";
-    const fresh = await api(`/api/leads/${currentLeadId}`);
-    renderEvents(fresh.events);
-    const lead = STATE.leads.find((l) => l.id === currentLeadId);
-    if (lead) { lead.updated_at = new Date().toISOString(); renderBoard(); }
+    await refreshLead();
+    await refreshLeadsList();
     if (dashboardVisible()) loadDashboard().catch(() => {});
-  } catch (err) {
-    showMsg($("d-msg"), err.message);
-  }
+  } catch (err) { showMsg($("d-msg"), err.message); }
+}
+$("d-add-note").onclick = () => addLeadNote("note", "");
+$("d-log-call").onclick = () => addLeadNote("call", "Call logged");
+$("d-log-email").onclick = () => addLeadNote("email", "Email logged");
+
+$("d-add-reminder").onclick = async () => {
+  clearMsg($("d-reminder-msg"));
+  const at = $("d-reminder-at").value;
+  if (!at) { showMsg($("d-reminder-msg"), "Pick a date & time"); return; }
+  try {
+    await api(`/api/leads/${currentLeadId}/reminders`, { method: "POST", body: JSON.stringify({ remind_at: new Date(at).toISOString(), note: $("d-reminder-note").value.trim() || null }) });
+    $("d-reminder-at").value = ""; $("d-reminder-note").value = "";
+    await refreshLead();
+    await refreshLeadsList();
+    if (dashboardVisible()) loadDashboard().catch(() => {});
+  } catch (err) { showMsg($("d-reminder-msg"), err.message); }
 };
+async function completeReminder(rid) { try { await api(`/api/reminders/${rid}`, { method: "PATCH", body: JSON.stringify({ status: "done" }) }); await refreshLead(); await refreshLeadsList(); if (dashboardVisible()) loadDashboard().catch(() => {}); } catch (e) { /* ignore */ } }
+async function deleteReminder(rid) { try { await api(`/api/reminders/${rid}`, { method: "DELETE" }); await refreshLead(); await refreshLeadsList(); if (dashboardVisible()) loadDashboard().catch(() => {}); } catch (e) { /* ignore */ } }
+
+$("d-upload").onclick = async () => {
+  clearMsg($("d-file-msg"));
+  const f = $("d-file-input").files[0];
+  if (!f) { showMsg($("d-file-msg"), "Choose a file first"); return; }
+  const fd = new FormData(); fd.append("file", f);
+  $("d-upload").disabled = true;
+  try {
+    const r = await fetch(`/api/leads/${currentLeadId}/files`, { method: "POST", body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "Upload failed");
+    $("d-file-input").value = "";
+    showMsg($("d-file-msg"), "Uploaded", true);
+    await refreshLead();
+  } catch (err) { showMsg($("d-file-msg"), err.message); }
+  finally { $("d-upload").disabled = false; }
+};
+async function deleteFile(aid) { try { await api(`/api/files/${aid}`, { method: "DELETE" }); await refreshLead(); } catch (e) { /* ignore */ } }
 
 // delete lead (two-step inline confirm — no browser dialog)
 $("d-delete").onclick = () => {

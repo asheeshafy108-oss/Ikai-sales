@@ -12,13 +12,17 @@
   },
   "vars": {
     "APP_URL": "https://app.ikai.com.au",
-    "FROM_EMAIL": "noreply@ikai.com.au"
+    "FROM_EMAIL": "noreply@ikai.com.au",
+    // Configurable exclusion list for demo->pipeline sync (domains or exact emails, comma-separated).
+    "INTERNAL_EMAILS": "@ikai.test,@ikai.com.au,@programapollo.com,asheeshafy108@gmail.com,arshad_1994@hotmail.com"
   },
   "routes": [
     { "pattern": "app.ikai.com.au", "custom_domain": true }
   ],
   "triggers": {
-    "crons": ["0 */6 * * *"]
+    // Single trigger (plan limit): every 5 min -> due-reminder emails; the heavy
+    // GA4 pre-warm + demo sync are gated to run ~every 6h inside the handler.
+    "crons": ["*/5 * * * *"]
   },
   "d1_databases": [
     {
@@ -26,6 +30,20 @@
       "database_name": "ikai-sales-db",
       "database_id": "e60e9945-74ea-4b62-9779-961d579e35af",
       "migrations_dir": "migrations"
+    },
+    {
+      // Demo funnel DB — READ-ONLY usage (signup sync). Never written to.
+      "binding": "DEMO_DB",
+      "database_name": "ikai-demo-db",
+      "database_id": "cc71cf9f-d391-4190-a3e1-22b366961e24"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // Lead attachment storage. Handlers (upload/download/delete) are gated on
+      // env.FILES; key layout is `${tenant_id}/${lead_id}/${attachment_id}`.
+      "binding": "FILES",
+      "bucket_name": "ikai-sales-files"
     }
   ]
 }

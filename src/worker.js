@@ -254,12 +254,14 @@ async function handleGetLeads(session, env) {
   // stage_since = timestamp the lead entered its current stage (last stage_change, else created).
   const { results: leads } = await env.DB.prepare(
     `SELECT l.id, l.stage_id, l.name, l.company, l.email, l.phone, l.source, l.value_cents,
-            l.notes, l.created_at, l.updated_at,
+            l.notes, l.created_at, l.updated_at, l.last_contacted,
             COALESCE(
               (SELECT MAX(e.created_at) FROM lead_events e
                 WHERE e.lead_id = l.id AND e.type = 'stage_change' AND e.to_stage = l.stage_id),
               l.created_at
-            ) AS stage_since
+            ) AS stage_since,
+            (SELECT r.remind_at FROM reminders r WHERE r.lead_id = l.id AND r.status = 'open' ORDER BY r.remind_at ASC LIMIT 1) AS next_remind_at,
+            (SELECT r.note FROM reminders r WHERE r.lead_id = l.id AND r.status = 'open' ORDER BY r.remind_at ASC LIMIT 1) AS next_remind_note
        FROM leads l WHERE l.tenant_id = ? ORDER BY l.updated_at DESC`,
   )
     .bind(session.tenant_id)
@@ -301,7 +303,8 @@ async function handleCreateLead(session, env, req) {
   const id = uuid();
   const ts = nowISO();
   const valueCents = normalizeValueCents(body.value_cents, body.value);
-  await env.DB.batch([
+  const initialNote = (body.notes || "").trim();
+  const stmts = [
     env.DB.prepare(
       `INSERT INTO leads (id, tenant_id, stage_id, name, company, email, phone, source,
                           value_cents, notes, created_at, updated_at)
@@ -324,7 +327,15 @@ async function handleCreateLead(session, env, req) {
       `INSERT INTO lead_events (id, lead_id, tenant_id, type, to_stage, actor_user_id, created_at)
        VALUES (?,?,?,?,?,?,?)`,
     ).bind(uuid(), id, session.tenant_id, "created", stageId, session.user.id, ts),
-  ]);
+  ];
+  // Seed the notes thread with any initial note so it shows in the lead view.
+  if (initialNote) {
+    stmts.push(
+      env.DB.prepare(`INSERT INTO lead_notes (id, lead_id, tenant_id, body, kind, author_email, created_at) VALUES (?,?,?,?,?,?,?)`)
+        .bind(uuid(), id, session.tenant_id, initialNote, "note", session.user.email, ts),
+    );
+  }
+  await env.DB.batch(stmts);
 
   const lead = await env.DB.prepare(`SELECT * FROM leads WHERE id = ? AND tenant_id = ?`)
     .bind(id, session.tenant_id)
@@ -349,13 +360,17 @@ async function handleGetLead(session, env, id) {
     .bind(id, session.tenant_id)
     .first();
   if (!lead) return err("Lead not found", 404);
-  const { results: events } = await env.DB.prepare(
-    `SELECT id, type, from_stage, to_stage, note, actor_user_id, created_at
-       FROM lead_events WHERE lead_id = ? AND tenant_id = ? ORDER BY created_at ASC`,
-  )
-    .bind(id, session.tenant_id)
-    .all();
-  return json({ lead, events });
+  const [events, notes, reminders, attachments] = await Promise.all([
+    env.DB.prepare(
+      `SELECT e.id, e.type, e.from_stage, e.to_stage, e.note, e.created_at, u.email AS actor_email
+         FROM lead_events e LEFT JOIN users u ON u.id = e.actor_user_id
+        WHERE e.lead_id = ? AND e.tenant_id = ? ORDER BY e.created_at DESC`,
+    ).bind(id, session.tenant_id).all(),
+    env.DB.prepare(`SELECT id, body, kind, author_email, created_at FROM lead_notes WHERE lead_id = ? AND tenant_id = ? ORDER BY created_at DESC`).bind(id, session.tenant_id).all(),
+    env.DB.prepare(`SELECT id, remind_at, note, status, sent_at, created_at, completed_at FROM reminders WHERE lead_id = ? AND tenant_id = ? ORDER BY remind_at ASC`).bind(id, session.tenant_id).all(),
+    env.DB.prepare(`SELECT id, filename, size, content_type, uploaded_by, created_at FROM attachments WHERE lead_id = ? AND tenant_id = ? ORDER BY created_at DESC`).bind(id, session.tenant_id).all(),
+  ]);
+  return json({ lead, events: events.results, notes: notes.results, reminders: reminders.results, attachments: attachments.results });
 }
 
 async function handleDeleteLead(session, env, id) {
@@ -365,11 +380,20 @@ async function handleDeleteLead(session, env, id) {
     .bind(id, session.tenant_id)
     .first();
   if (!lead) return err("Lead not found", 404);
-  // Cascade to the lead's events, then remove the lead. batch() is atomic in D1.
+  // Best-effort remove the lead's files from R2 first.
+  if (env.FILES) {
+    const { results: atts } = await env.DB.prepare(`SELECT r2_key FROM attachments WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id).all();
+    for (const a of atts) { try { await env.FILES.delete(a.r2_key); } catch (e) { /* ignore */ } }
+  }
+  // Cascade to the lead's events/notes/reminders/attachments, then the lead. batch() is atomic.
   await env.DB.batch([
     env.DB.prepare(`DELETE FROM lead_events WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
+    env.DB.prepare(`DELETE FROM lead_notes WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
+    env.DB.prepare(`DELETE FROM reminders WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
+    env.DB.prepare(`DELETE FROM attachments WHERE lead_id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
     env.DB.prepare(`DELETE FROM leads WHERE id = ? AND tenant_id = ?`).bind(id, session.tenant_id),
   ]);
+  // demo_sync rows are intentionally NOT removed → a deleted demo lead never re-imports.
   return json({ ok: true });
 }
 
@@ -857,17 +881,19 @@ async function handlePatchLead(session, env, id, req) {
     email: body.email !== undefined ? body.email || null : lead.email,
     phone: body.phone !== undefined ? body.phone || null : lead.phone,
     notes: body.notes !== undefined ? body.notes || null : lead.notes,
+    source: body.source !== undefined && validSource(body.source) ? body.source : lead.source,
     stage_id: newStageId,
     value_cents:
       body.value_cents !== undefined || body.value !== undefined
         ? normalizeValueCents(body.value_cents, body.value)
         : lead.value_cents,
+    last_contacted: body.last_contacted !== undefined ? (body.last_contacted || null) : lead.last_contacted,
   };
   if (!fields.name) return err("Lead name cannot be empty");
 
   stmts.unshift(
     env.DB.prepare(
-      `UPDATE leads SET name=?, company=?, email=?, phone=?, notes=?, stage_id=?, value_cents=?, updated_at=?
+      `UPDATE leads SET name=?, company=?, email=?, phone=?, notes=?, source=?, stage_id=?, value_cents=?, last_contacted=?, updated_at=?
         WHERE id=? AND tenant_id=?`,
     ).bind(
       fields.name,
@@ -875,8 +901,10 @@ async function handlePatchLead(session, env, id, req) {
       fields.email,
       fields.phone,
       fields.notes,
+      fields.source,
       fields.stage_id,
       fields.value_cents,
+      fields.last_contacted,
       ts,
       id,
       session.tenant_id,
@@ -890,25 +918,226 @@ async function handlePatchLead(session, env, id, req) {
   return json({ lead: updated });
 }
 
+// Adds a note (or a quick-action call/email note) to the lead's notes thread,
+// logs the matching activity event, and treats it as contact (bumps last_contacted).
 async function handleAddNote(session, env, id, req) {
   const body = await req.json().catch(() => null);
   const note = (body && body.note ? String(body.note) : "").trim();
   if (!note) return err("Note is required");
+  const kind = ["note", "call", "email"].includes(body && body.kind) ? body.kind : "note";
   const lead = await env.DB.prepare(`SELECT id FROM leads WHERE id = ? AND tenant_id = ?`)
     .bind(id, session.tenant_id)
     .first();
   if (!lead) return err("Lead not found", 404);
   const ts = nowISO();
-  await env.DB.prepare(
-    `INSERT INTO lead_events (id, lead_id, tenant_id, type, note, actor_user_id, created_at)
-     VALUES (?,?,?,?,?,?,?)`,
-  )
-    .bind(uuid(), id, session.tenant_id, "note", note, session.user.id, ts)
-    .run();
-  await env.DB.prepare(`UPDATE leads SET updated_at=? WHERE id=? AND tenant_id=?`)
-    .bind(ts, id, session.tenant_id)
-    .run();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO lead_notes (id, lead_id, tenant_id, body, kind, author_email, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .bind(uuid(), id, session.tenant_id, note, kind, session.user.email, ts),
+    env.DB.prepare(`INSERT INTO lead_events (id, lead_id, tenant_id, type, note, actor_user_id, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .bind(uuid(), id, session.tenant_id, kind, note, session.user.id, ts),
+    env.DB.prepare(`UPDATE leads SET updated_at=?, last_contacted=? WHERE id=? AND tenant_id=?`)
+      .bind(ts, ts, id, session.tenant_id),
+  ]);
   return json({ ok: true }, 201);
+}
+
+function escapeHtmlServer(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ---------- reminders ----------
+async function handleCreateReminder(session, env, id, req) {
+  const body = await req.json().catch(() => null);
+  if (!body || !body.remind_at) return err("remind_at is required");
+  const t = new Date(body.remind_at);
+  if (isNaN(t.getTime())) return err("Invalid remind_at");
+  const lead = await env.DB.prepare(`SELECT id FROM leads WHERE id=? AND tenant_id=?`).bind(id, session.tenant_id).first();
+  if (!lead) return err("Lead not found", 404);
+  const rid = uuid();
+  const ts = nowISO();
+  const whenISO = t.toISOString();
+  const note = body.note ? String(body.note).slice(0, 500) : null;
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO reminders (id, lead_id, tenant_id, remind_at, note, status, created_by, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .bind(rid, id, session.tenant_id, whenISO, note, "open", session.user.email, ts),
+    env.DB.prepare(`INSERT INTO lead_events (id, lead_id, tenant_id, type, note, actor_user_id, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .bind(uuid(), id, session.tenant_id, "reminder", `Reminder set${note ? " — " + note : ""}`, session.user.id, ts),
+  ]);
+  return json({ ok: true, id: rid }, 201);
+}
+async function handleUpdateReminder(session, env, rid, req) {
+  const body = await req.json().catch(() => ({}));
+  const rem = await env.DB.prepare(`SELECT id FROM reminders WHERE id=? AND tenant_id=?`).bind(rid, session.tenant_id).first();
+  if (!rem) return err("Reminder not found", 404);
+  if (body.status === "done") {
+    await env.DB.prepare(`UPDATE reminders SET status='done', completed_at=? WHERE id=? AND tenant_id=?`).bind(nowISO(), rid, session.tenant_id).run();
+  }
+  return json({ ok: true });
+}
+async function handleDeleteReminder(session, env, rid) {
+  const rem = await env.DB.prepare(`SELECT id FROM reminders WHERE id=? AND tenant_id=?`).bind(rid, session.tenant_id).first();
+  if (!rem) return err("Reminder not found", 404);
+  await env.DB.prepare(`DELETE FROM reminders WHERE id=? AND tenant_id=?`).bind(rid, session.tenant_id).run();
+  return json({ ok: true });
+}
+
+// ---------- attachments (R2) ----------
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const ALLOWED_UPLOAD_TYPES = new Set([
+  "application/pdf", "image/png", "image/jpeg", "image/gif", "image/webp",
+  "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/csv", "text/plain",
+]);
+async function handleUploadFile(session, env, id, req) {
+  if (!env.FILES) return err("Attachments aren't configured yet — the R2 bucket isn't bound.", 503);
+  const lead = await env.DB.prepare(`SELECT id FROM leads WHERE id=? AND tenant_id=?`).bind(id, session.tenant_id).first();
+  if (!lead) return err("Lead not found", 404);
+  const form = await req.formData().catch(() => null);
+  const file = form && form.get("file");
+  if (!file || typeof file === "string") return err("No file provided");
+  const contentType = file.type || "application/octet-stream";
+  if (!ALLOWED_UPLOAD_TYPES.has(contentType)) return err("File type not allowed — PDFs, images, and common Office/text docs only", 415);
+  if (file.size > MAX_UPLOAD_BYTES) return err("File exceeds the 10MB limit", 413);
+  const filename = (file.name || "file").slice(0, 200);
+  const aid = uuid();
+  const key = `${session.tenant_id}/${id}/${aid}`;
+  await env.FILES.put(key, file.stream(), { httpMetadata: { contentType } });
+  const ts = nowISO();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO attachments (id, lead_id, tenant_id, filename, size, content_type, r2_key, uploaded_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .bind(aid, id, session.tenant_id, filename, file.size, contentType, key, session.user.email, ts),
+    env.DB.prepare(`INSERT INTO lead_events (id, lead_id, tenant_id, type, note, actor_user_id, created_at) VALUES (?,?,?,?,?,?,?)`)
+      .bind(uuid(), id, session.tenant_id, "file", `Uploaded ${filename}`, session.user.id, ts),
+  ]);
+  return json({ ok: true, id: aid, filename, size: file.size }, 201);
+}
+async function handleDownloadFile(session, env, aid) {
+  if (!env.FILES) return err("Attachments aren't configured yet.", 503);
+  const att = await env.DB.prepare(`SELECT r2_key, filename, content_type FROM attachments WHERE id=? AND tenant_id=?`).bind(aid, session.tenant_id).first();
+  if (!att) return err("Attachment not found", 404);
+  const obj = await env.FILES.get(att.r2_key);
+  if (!obj) return err("File missing from storage", 404);
+  return new Response(obj.body, {
+    headers: {
+      "content-type": att.content_type || "application/octet-stream",
+      "content-disposition": `attachment; filename="${att.filename.replace(/[\r\n"]/g, "")}"`,
+      "cache-control": "private, no-store",
+    },
+  });
+}
+async function handleDeleteFile(session, env, aid) {
+  const att = await env.DB.prepare(`SELECT r2_key FROM attachments WHERE id=? AND tenant_id=?`).bind(aid, session.tenant_id).first();
+  if (!att) return err("Attachment not found", 404);
+  if (env.FILES) { try { await env.FILES.delete(att.r2_key); } catch (e) { /* ignore */ } }
+  await env.DB.prepare(`DELETE FROM attachments WHERE id=? AND tenant_id=?`).bind(aid, session.tenant_id).run();
+  return json({ ok: true });
+}
+
+// ---------- demo signup sync (Part A) ----------
+function parseExclusions(str) {
+  return (str || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+function isExcludedEmail(email, list) {
+  const e = (email || "").toLowerCase();
+  if (!e) return true;
+  return list.some((x) => (x.startsWith("@") ? e.endsWith(x) : e === x));
+}
+async function syncDemoSignups(env) {
+  if (!env.DEMO_DB) { console.error("[sync] DEMO_DB binding missing — skipping demo sync"); return { error: "DEMO_DB not bound" }; }
+  const excl = parseExclusions(env.INTERNAL_EMAILS);
+  let demoUsers;
+  try {
+    const r = await env.DEMO_DB.prepare(`SELECT id, email, name, created_at FROM users ORDER BY created_at ASC`).all();
+    demoUsers = r.results || [];
+  } catch (e) {
+    console.error(`[sync] cannot read demo DB: ${e && e.message}`);
+    return { error: `demo DB read failed: ${e && e.message}` };
+  }
+  const tenant = await env.DB.prepare(`SELECT id FROM tenants ORDER BY rowid LIMIT 1`).first();
+  if (!tenant) return { error: "no tenant configured" };
+  const firstStage = await env.DB.prepare(`SELECT id FROM stages WHERE tenant_id=? ORDER BY position LIMIT 1`).bind(tenant.id).first();
+  if (!firstStage) return { error: "no stages configured" };
+  let created = 0, skipped = 0;
+  for (const u of demoUsers) {
+    if (isExcludedEmail(u.email, excl)) { skipped++; continue; }
+    const already = await env.DB.prepare(`SELECT 1 FROM demo_sync WHERE demo_user_id=?`).bind(u.id).first();
+    if (already) { skipped++; continue; }
+    let sess = 0, asks = 0;
+    try { const s = await env.DEMO_DB.prepare(`SELECT COUNT(*) c FROM sessions WHERE user_id=?`).bind(u.id).first(); sess = s ? s.c : 0; } catch (e) { /* table optional */ }
+    try { const a = await env.DEMO_DB.prepare(`SELECT COUNT(*) c FROM ask_log WHERE user_id=?`).bind(u.id).first(); asks = a ? a.c : 0; } catch (e) { /* table optional */ }
+    const name = (u.name && u.name.trim()) ? u.name.trim() : (u.email || "lead").split("@")[0];
+    const signup = (u.created_at || "").slice(0, 10);
+    const noteBody = `Signed up to demo ${signup} · sessions: ${sess} · AI questions asked: ${asks}`;
+    const ts = nowISO();
+    // de-dupe by email — if a lead with this email already exists, map it, don't duplicate
+    const existing = await env.DB.prepare(`SELECT id FROM leads WHERE tenant_id=? AND lower(email)=lower(?)`).bind(tenant.id, u.email).first();
+    if (existing) {
+      await env.DB.prepare(`INSERT OR IGNORE INTO demo_sync (demo_user_id, email, lead_id, synced_at) VALUES (?,?,?,?)`).bind(u.id, u.email, existing.id, ts).run();
+      skipped++; continue;
+    }
+    const leadId = uuid();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO leads (id, tenant_id, stage_id, name, company, email, phone, source, value_cents, notes, created_at, updated_at, last_contacted)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(leadId, tenant.id, firstStage.id, name, null, u.email, null, "demo", null, null, ts, ts, null),
+      env.DB.prepare(`INSERT INTO lead_events (id, lead_id, tenant_id, type, to_stage, note, actor_user_id, created_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .bind(uuid(), leadId, tenant.id, "created", firstStage.id, "Imported from demo signup", null, ts),
+      env.DB.prepare(`INSERT INTO lead_notes (id, lead_id, tenant_id, body, kind, author_email, created_at) VALUES (?,?,?,?,?,?,?)`)
+        .bind(uuid(), leadId, tenant.id, noteBody, "system", null, ts),
+      env.DB.prepare(`INSERT INTO demo_sync (demo_user_id, email, lead_id, synced_at) VALUES (?,?,?,?)`).bind(u.id, u.email, leadId, ts),
+    ]);
+    created++;
+  }
+  console.log(`[sync] demo signups: created ${created}, skipped ${skipped}, of ${demoUsers.length}`);
+  return { created, skipped, total: demoUsers.length };
+}
+async function handleSyncDemo(session, env) {
+  const result = await syncDemoSignups(env);
+  // Never 500 — a sync problem must not break the dashboard.
+  return json(result.error ? { ok: false, ...result } : { ok: true, ...result });
+}
+
+// ---------- reminder emails (Part B, via cron) ----------
+async function sendDueReminders(env) {
+  // remind_at is ISO-8601 (…T…Z); compare via julianday so it normalises
+  // correctly against 'now' (a plain string <= would mis-order the 'T').
+  const { results } = await env.DB.prepare(
+    `SELECT r.id, r.lead_id, r.tenant_id, r.note, r.remind_at, l.name AS lead_name
+       FROM reminders r JOIN leads l ON l.id = r.lead_id
+      WHERE r.status='open' AND r.sent_at IS NULL AND julianday(r.remind_at) <= julianday('now') LIMIT 50`,
+  ).all();
+  for (const r of results) {
+    const owner = await env.DB.prepare(`SELECT email FROM users WHERE tenant_id=? AND role='owner' ORDER BY created_at LIMIT 1`).bind(r.tenant_id).first();
+    const to = owner ? owner.email : null;
+    if (!to) { console.error(`[reminder] no owner email for tenant ${r.tenant_id}`); continue; }
+    const res = await sendReminderEmail(env, to, r);
+    if (res.ok) await env.DB.prepare(`UPDATE reminders SET sent_at=datetime('now') WHERE id=?`).bind(r.id).run();
+    else console.error(`[reminder] email failed for ${r.id}: ${res.error}`);
+  }
+}
+async function sendReminderEmail(env, to, r) {
+  if (!env.RESEND_API_KEY) return { ok: false, error: "no RESEND_API_KEY" };
+  const app = env.APP_URL || "https://app.ikai.com.au";
+  const line = `${r.lead_name}${r.note ? " — " + r.note : ""}`;
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: `ikai Sales <${env.FROM_EMAIL}>`,
+        to: [to],
+        subject: `Reminder: ${line}`,
+        html: `<p>Reminder for lead <b>${escapeHtmlServer(r.lead_name)}</b>.</p>${r.note ? `<p>${escapeHtmlServer(r.note)}</p>` : ""}<p>Due: ${escapeHtmlServer(r.remind_at)}</p><p><a href="${app}/app">Open ikai Sales →</a></p>`,
+        text: `Reminder: ${line} (due ${r.remind_at}). Open ikai Sales: ${app}/app`,
+      }),
+    });
+    if (!res.ok) { const t = await res.text().catch(() => ""); return { ok: false, error: `Resend ${res.status}: ${t.slice(0, 150)}` }; }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message };
+  }
 }
 
 async function handleImport(session, env, req) {
@@ -1124,18 +1353,27 @@ async function handleDashboard(session, env) {
   wc.forEach((r) => { if (r.wk >= 0 && r.wk < 8) created8[7 - r.wk] += r.c; });
   ww.forEach((r) => { if (r.wk >= 0 && r.wk < 8) won8[7 - r.wk] += r.c; });
 
-  // Stale open leads: no lead_events in 7+ days.
+  // Stale open leads: not contacted (last_contacted, else created) in 7+ days.
   const { results: stale } = await env.DB.prepare(
     `SELECT l.id, l.name, l.stage_id,
-            MAX(e.created_at) last_event,
-            CAST(julianday('now') - julianday(MAX(e.created_at)) AS INT) days_silent
-       FROM leads l JOIN lead_events e ON e.lead_id = l.id
+            COALESCE(l.last_contacted, l.created_at) last_contacted,
+            CAST(julianday('now') - julianday(COALESCE(l.last_contacted, l.created_at)) AS INT) days_silent
+       FROM leads l
       WHERE l.tenant_id = ? ${notClosedL}
-      GROUP BY l.id
-     HAVING julianday(MAX(e.created_at)) < julianday('now','-7 days')
-      ORDER BY last_event ASC LIMIT 25`,
+        AND julianday(COALESCE(l.last_contacted, l.created_at)) < julianday('now','-7 days')
+      ORDER BY last_contacted ASC LIMIT 25`,
   )
     .bind(t, ...closed)
+    .all();
+
+  // Reminders due today or overdue (for the "Due today" strip).
+  const { results: dueToday } = await env.DB.prepare(
+    `SELECT r.id, r.remind_at, r.note, l.id lead_id, l.name lead_name
+       FROM reminders r JOIN leads l ON l.id = r.lead_id
+      WHERE r.tenant_id = ? AND r.status='open' AND date(r.remind_at) <= date('now')
+      ORDER BY r.remind_at ASC LIMIT 25`,
+  )
+    .bind(t)
     .all();
 
   // Activity feed: last 15 events with lead + actor names.
@@ -1166,13 +1404,14 @@ async function handleDashboard(session, env) {
     sources,
     weekly: { created: created8, won: won8 },
     stale,
+    dueToday,
     activity,
   });
 }
 
 // ---------- router ----------
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -1196,13 +1435,21 @@ export default {
 
       if (path === "/api/me" && method === "GET") return await handleMe(session, env);
       if (path === "/api/stages" && method === "GET") return await handleGetStages(session, env);
-      if (path === "/api/dashboard" && method === "GET") return await handleDashboard(session, env);
+      if (path === "/api/dashboard" && method === "GET") {
+        const res = await handleDashboard(session, env);
+        // Opportunistic background work — cron triggers are unreliable on this
+        // plan, so flush due reminders AND sync new demo signups whenever the
+        // owner is active. Non-blocking; failures only log.
+        ctx.waitUntil(Promise.all([sendDueReminders(env), syncDemoSignups(env)]));
+        return res;
+      }
       if (path === "/api/marketing/google" && method === "GET") return await handleMarketingGoogle(session, env, url);
       if (path === "/api/marketing/overview" && method === "GET") return await handleMarketingOverview(session, env, url);
       if (path === "/api/marketing/linkedin" && method === "GET") return await handleMarketingLinkedin(session, env, url);
       if (path === "/api/marketing/config" && method === "GET") return await handleGetMarketingConfig(session, env);
       if (path === "/api/marketing/config" && method === "PUT") return await handleUpdateMarketingConfig(session, env, req);
       if (path === "/api/assistant" && method === "POST") return await handleAssistant(session, env, req);
+      if (path === "/api/sync/demo" && method === "POST") return await handleSyncDemo(session, env);
       if (path === "/api/invites" && method === "POST")
         return await handleCreateInvite(session, env, req);
 
@@ -1226,14 +1473,40 @@ export default {
       if (noteMatch && method === "POST")
         return await handleAddNote(session, env, noteMatch[1], req);
 
+      const remMatch = path.match(/^\/api\/leads\/([^/]+)\/reminders$/);
+      if (remMatch && method === "POST")
+        return await handleCreateReminder(session, env, remMatch[1], req);
+
+      const remIdMatch = path.match(/^\/api\/reminders\/([^/]+)$/);
+      if (remIdMatch) {
+        if (method === "PATCH") return await handleUpdateReminder(session, env, remIdMatch[1], req);
+        if (method === "DELETE") return await handleDeleteReminder(session, env, remIdMatch[1]);
+      }
+
+      const fileUpMatch = path.match(/^\/api\/leads\/([^/]+)\/files$/);
+      if (fileUpMatch && method === "POST")
+        return await handleUploadFile(session, env, fileUpMatch[1], req);
+
+      const fileIdMatch = path.match(/^\/api\/files\/([^/]+)$/);
+      if (fileIdMatch) {
+        if (method === "GET") return await handleDownloadFile(session, env, fileIdMatch[1]);
+        if (method === "DELETE") return await handleDeleteFile(session, env, fileIdMatch[1]);
+      }
+
       return err("Not found", 404);
     } catch (e) {
       return err("Internal error: " + (e && e.message ? e.message : String(e)), 500);
     }
   },
 
-  // Cron (0 */6 * * *): pre-warm the 6h channel caches so those tabs load instantly.
+  // Single 5-min cron: always send due reminder emails; run the heavier GA4
+  // pre-warm + demo sync only near a 6-hour boundary (00/06/12/18 UTC).
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(prewarmMarketing(env));
+    const jobs = [sendDueReminders(env)];
+    const d = new Date(event.scheduledTime || Date.now());
+    if (d.getUTCHours() % 6 === 0 && d.getUTCMinutes() < 5) {
+      jobs.push(prewarmMarketing(env), syncDemoSignups(env));
+    }
+    ctx.waitUntil(Promise.all(jobs));
   },
 };
