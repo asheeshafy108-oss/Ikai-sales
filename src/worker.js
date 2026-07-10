@@ -220,6 +220,131 @@ async function handleLogin(req, env) {
   return startSession(env, req, user.id);
 }
 
+// ---------- password reset ----------
+const RESET_TTL_MIN = 60;              // reset links valid for 1 hour
+const RESET_MAX_PER_HOUR = 5;          // per-user issue cap (anti-abuse)
+
+// POST /api/auth/forgot { email } — always returns ok (no account enumeration).
+// If the email maps to a user, mint a single-use token and email the link.
+async function handleForgotPassword(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const email = (body.email || "").trim().toLowerCase();
+  if (!email || !EMAIL_RE.test(email)) return err("A valid email is required");
+
+  const ok = { ok: true, message: "If an account exists for that email, a reset link is on its way." };
+  const user = await env.DB.prepare(`SELECT id, tenant_id FROM users WHERE email = ?`).bind(email).first();
+  if (!user) return json(ok); // same response whether or not the account exists
+
+  // Rate limit: cap tokens issued per user per hour.
+  const windowStart = new Date(Date.now() - 60 * 60_000).toISOString();
+  const { count } = await env.DB
+    .prepare(`SELECT COUNT(*) AS count FROM password_resets WHERE user_id = ? AND created_at > ?`)
+    .bind(user.id, windowStart)
+    .first();
+  if (count >= RESET_MAX_PER_HOUR) return json(ok);
+
+  const token = randHex(32);
+  const tokenHash = await sha256Hex(token);
+  const ts = nowISO();
+  const expiresAt = new Date(Date.now() + RESET_TTL_MIN * 60_000).toISOString();
+  // Invalidate any earlier unused tokens for this user, then issue the new one.
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE password_resets SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(ts, user.id),
+    env.DB.prepare(`INSERT INTO password_resets (token_hash, user_id, tenant_id, expires_at, used_at, created_at) VALUES (?,?,?,?,NULL,?)`)
+      .bind(tokenHash, user.id, user.tenant_id, expiresAt, ts),
+  ]);
+
+  const app = env.APP_URL || "https://app.ikai.com.au";
+  const link = `${app}/reset?token=${token}`;
+  const sent = await sendPasswordResetEmail(env, email, link);
+  if (!sent.ok) console.error(`[reset] email failed for ${email}: ${sent.error}`);
+  return json(ok);
+}
+
+async function sendPasswordResetEmail(env, to, link) {
+  if (!env.RESEND_API_KEY) return { ok: false, error: "no RESEND_API_KEY" };
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: `ikai Sales <${env.FROM_EMAIL}>`,
+        to: [to],
+        subject: "Reset your ikai Sales password",
+        html: `<p>We received a request to reset your ikai Sales password.</p>` +
+              `<p><a href="${link}">Choose a new password →</a></p>` +
+              `<p>This link expires in ${RESET_TTL_MIN} minutes and can be used once. ` +
+              `If you didn't request this, you can safely ignore this email.</p>`,
+        text: `Reset your ikai Sales password:\n${link}\n\nThis link expires in ${RESET_TTL_MIN} minutes and can be used once. If you didn't request this, ignore this email.`,
+      }),
+    });
+    if (!res.ok) { const t = await res.text().catch(() => ""); return { ok: false, error: `Resend ${res.status}: ${t.slice(0, 150)}` }; }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e && e.message };
+  }
+}
+
+// POST /api/auth/reset { token, password } — redeem a token and set a new password.
+async function handleResetPassword(req, env) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const token = (body.token || "").trim();
+  const password = body.password || "";
+  if (!token) return err("Reset token is required");
+  if (password.length < 8) return err("Password must be at least 8 characters");
+
+  const tokenHash = await sha256Hex(token);
+  const row = await env.DB
+    .prepare(`SELECT token_hash, user_id, tenant_id, expires_at, used_at FROM password_resets WHERE token_hash = ?`)
+    .bind(tokenHash)
+    .first();
+  if (!row || row.used_at) return err("This reset link is invalid or has already been used.", 400);
+  if (new Date(row.expires_at).getTime() < Date.now()) return err("This reset link has expired. Please request a new one.", 400);
+
+  const passwordHash = await hashPassword(password);
+  const ts = nowISO();
+  // Set the new password, burn the token (single-use), and invalidate any other
+  // outstanding tokens + all existing sessions for that user (force re-login).
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET password_hash = ? WHERE id = ? AND tenant_id = ?`).bind(passwordHash, row.user_id, row.tenant_id),
+    env.DB.prepare(`UPDATE password_resets SET used_at = ? WHERE user_id = ? AND used_at IS NULL`).bind(ts, row.user_id),
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(row.user_id),
+    env.DB.prepare(`DELETE FROM login_attempts WHERE email = (SELECT email FROM users WHERE id = ?)`).bind(row.user_id),
+  ]);
+  return json({ ok: true });
+}
+
+// POST /api/auth/change-password { current_password, new_password } — logged-in.
+async function handleChangePassword(session, env, req) {
+  const body = await req.json().catch(() => null);
+  if (!body) return err("Invalid request body");
+  const current = body.current_password || "";
+  const next = body.new_password || "";
+  if (!current || !next) return err("Current and new password are required");
+  if (next.length < 8) return err("New password must be at least 8 characters");
+
+  const user = await env.DB.prepare(`SELECT password_hash FROM users WHERE id = ? AND tenant_id = ?`)
+    .bind(session.user.id, session.tenant_id)
+    .first();
+  if (!user) return err("Unauthorized", 401);
+  const ok = await verifyPassword(current, user.password_hash);
+  if (!ok) return err("Current password is incorrect", 400);
+  if (await verifyPassword(next, user.password_hash)) return err("New password must be different from the current one", 400);
+
+  const passwordHash = await hashPassword(next);
+  const currentToken = parseCookies(req).sid;
+  const currentHash = currentToken ? await sha256Hex(currentToken) : "";
+  // Update the password and sign out every OTHER session for this user; keep the
+  // session making the change so the user isn't logged out of the current tab.
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET password_hash = ? WHERE id = ? AND tenant_id = ?`).bind(passwordHash, session.user.id, session.tenant_id),
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ? AND token_hash != ?`).bind(session.user.id, currentHash),
+  ]);
+  return json({ ok: true });
+}
+
 async function handleLogout(req, env) {
   const token = parseCookies(req).sid;
   if (token) {
@@ -1427,6 +1552,8 @@ export default {
       if (path === "/api/auth/register" && method === "POST") return await handleRegister(req, env);
       if (path === "/api/auth/login" && method === "POST") return await handleLogin(req, env);
       if (path === "/api/auth/logout" && method === "POST") return await handleLogout(req, env);
+      if (path === "/api/auth/forgot" && method === "POST") return await handleForgotPassword(req, env);
+      if (path === "/api/auth/reset" && method === "POST") return await handleResetPassword(req, env);
       if (path === "/api/join" && method === "POST") return await handleJoin(req, env);
 
       // Everything below requires a valid session.
@@ -1434,6 +1561,7 @@ export default {
       if (!session) return err("Unauthorized", 401);
 
       if (path === "/api/me" && method === "GET") return await handleMe(session, env);
+      if (path === "/api/auth/change-password" && method === "POST") return await handleChangePassword(session, env, req);
       if (path === "/api/stages" && method === "GET") return await handleGetStages(session, env);
       if (path === "/api/dashboard" && method === "GET") {
         const res = await handleDashboard(session, env);

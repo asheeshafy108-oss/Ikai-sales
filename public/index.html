@@ -23,7 +23,25 @@
         </form>
         <div class="msg" id="loginMsg"></div>
         <div class="toggle-row">
+          <span class="link" id="showForgot">Forgot password?</span>
+        </div>
+        <div class="toggle-row">
           New here? <span class="link" id="showRegister">Register your business</span>
+        </div>
+      </div>
+
+      <!-- Forgot password view -->
+      <div id="forgotView" class="hidden">
+        <h1>Reset your <span class="brand">password</span></h1>
+        <p class="sub">Enter your account email and we'll send you a reset link.</p>
+        <form id="forgotForm">
+          <label for="fp-email">Email</label>
+          <input id="fp-email" type="email" autocomplete="email" required />
+          <button class="btn block" type="submit">Send reset link</button>
+        </form>
+        <div class="msg" id="forgotMsg"></div>
+        <div class="toggle-row">
+          Remembered it? <span class="link" id="showLoginFromForgot">Back to sign in</span>
         </div>
       </div>
 
@@ -53,9 +71,14 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const show = (el, msg, ok) => { el.className = "msg " + (ok ? "ok" : "error"); el.textContent = msg; };
+    const clearMsg = (el) => { el.className = "msg"; el.textContent = ""; };
 
-    $("showRegister").onclick = () => { $("loginView").classList.add("hidden"); $("registerView").classList.remove("hidden"); };
-    $("showLogin").onclick = () => { $("registerView").classList.add("hidden"); $("loginView").classList.remove("hidden"); };
+    const views = ["loginView", "registerView", "forgotView"];
+    const showView = (id) => views.forEach((v) => $(v).classList.toggle("hidden", v !== id));
+    $("showRegister").onclick = () => showView("registerView");
+    $("showLogin").onclick = () => showView("loginView");
+    $("showForgot").onclick = () => { clearMsg($("forgotMsg")); showView("forgotView"); };
+    $("showLoginFromForgot").onclick = () => showView("loginView");
 
     async function post(url, body) {
       const r = await fetch(url, {
@@ -93,6 +116,16 @@
       btn.disabled = false;
       if (ok) location.href = "/app";
       else show($("registerMsg"), data.error || "Registration failed");
+    };
+
+    $("forgotForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector("button");
+      btn.disabled = true;
+      const { ok, data } = await post("/api/auth/forgot", { email: $("fp-email").value });
+      btn.disabled = false;
+      if (ok) show($("forgotMsg"), data.message || "If an account exists for that email, a reset link is on its way.", true);
+      else show($("forgotMsg"), data.error || "Something went wrong. Please try again.");
     };
   </script>
 </body>

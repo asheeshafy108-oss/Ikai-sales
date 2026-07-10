@@ -95,17 +95,25 @@ async function main() {
   const alice = created.find((l) => l.name === "Alice");
   let mv = await owner.patch(`/api/leads/${alice.id}`, { stage_id: byName("Contacted").id });
   check("move 1 ok (stage=Contacted)", mv.data.lead?.stage_id === byName("Contacted").id);
+  // Ensure the two moves get distinct created_at timestamps (nowISO is ms-precision)
+  // so newest-first ordering is well-defined rather than a same-ms tie.
+  await new Promise((r) => setTimeout(r, 50));
   mv = await owner.patch(`/api/leads/${alice.id}`, { stage_id: byName("Consult booked").id });
   check("move 2 ok (stage=Consult booked)", mv.data.lead?.stage_id === byName("Consult booked").id);
   const detail = await owner.get(`/api/leads/${alice.id}`);
   const evs = detail.data.events;
-  const stageChanges = evs.filter((e) => e.type === "stage_change");
+  // The endpoint returns events newest-first (ORDER BY created_at DESC), so the
+  // most recent stage change (Contacted->Consult booked) is index 0. Sort by
+  // created_at DESC defensively so the assertion never depends on DB tie-order.
+  const stageChanges = evs
+    .filter((e) => e.type === "stage_change")
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
   check("has created event", evs.some((e) => e.type === "created"));
   check("2 stage_change events", stageChanges.length === 2, "got " + stageChanges.length);
-  check("first change New->Contacted",
-    stageChanges[0].from_stage === byName("New").id && stageChanges[0].to_stage === byName("Contacted").id);
-  check("second change Contacted->Consult booked",
-    stageChanges[1].from_stage === byName("Contacted").id && stageChanges[1].to_stage === byName("Consult booked").id);
+  check("latest change Contacted->Consult booked",
+    stageChanges[0].from_stage === byName("Contacted").id && stageChanges[0].to_stage === byName("Consult booked").id);
+  check("earlier change New->Contacted",
+    stageChanges[1].from_stage === byName("New").id && stageChanges[1].to_stage === byName("Contacted").id);
 
   // ---- Test 4: invite + join as member ----
   section("Test 4 — Invite flow, member joins same tenant, owner-only enforced");

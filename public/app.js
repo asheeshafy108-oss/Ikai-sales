@@ -1,7 +1,7 @@
 // ikai-sales dashboard client.
 const $ = (id) => document.getElementById(id);
 
-let STATE = { me: null, stages: [], leads: [], parsedRows: [], marketingRange: "monthly", marketingChannel: "overview" };
+let STATE = { me: null, stages: [], leads: [], parsedRows: [], marketingRange: "monthly", marketingChannel: "overview", boardFilter: null };
 
 // ---------- api ----------
 async function api(url, opts = {}) {
@@ -91,10 +91,11 @@ function renderDashMarketing(g) {
   const b = g.budget || {};
   const ev = (k) => (ke[k] ? ke[k].cur : 0);
   $("dashMktRow").innerHTML =
-    kpiCard("Website sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`) +
-    kpiCard("Demo link requests", ev("demo_link_requested").toLocaleString(), "GA4 conversion") +
-    kpiCard("Onboarding completes", ev("demo_onboarding_complete").toLocaleString(), "GA4 conversion") +
+    navCard("Website sessions", g.sessions.cur.toLocaleString(), `vs ${g.sessions.prev} prior · ${deltaHtml(g.sessions.cur, g.sessions.prev)}`, "marketing") +
+    navCard("Demo link requests", ev("demo_link_requested").toLocaleString(), "GA4 conversion", "marketing") +
+    navCard("Onboarding completes", ev("demo_onboarding_complete").toLocaleString(), "GA4 conversion", "marketing") +
     kpiCard("Ad daily budget", audMoney(b.dailyBudget || 0), "AUD · Google Ads");
+  wireCardNav($("dashMktRow"));
 }
 
 // When the pipeline has no activity, the 8-week flow chart is just a flat zero —
@@ -119,11 +120,155 @@ function showTab(name) {
   if (name === "dashboard") loadDashboard().catch(() => {});
   if (name === "marketing") loadMarketing().catch(() => {});
 }
-document.querySelectorAll(".tab").forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
+document.querySelectorAll(".tab").forEach((b) => (b.onclick = () => {
+  // Clicking the Pipeline tab directly clears any active stage filter (card-nav sets it).
+  if (b.dataset.tab === "pipeline" && STATE.boardFilter) { STATE.boardFilter = null; renderBoard(); }
+  showTab(b.dataset.tab);
+}));
+
+// ---------- card navigation (clickable dashboard cards) ----------
+function goToPipeline(stageFilterId) {
+  STATE.boardFilter = stageFilterId || null;
+  renderBoard();
+  showTab("pipeline");
+}
+function goToMarketing(channel) {
+  if (channel) STATE.marketingChannel = channel;
+  showTab("marketing");
+  if (channel) showChannel(channel);
+}
+function wonStageId() {
+  const s = STATE.stages.find((x) => (x.name || "").toLowerCase() === "won");
+  return s ? s.id : null;
+}
+function handleCardNav(nav) {
+  if (nav === "pipeline") goToPipeline(null);
+  else if (nav === "pipeline-won") goToPipeline(wonStageId());
+  else if (nav === "marketing") goToMarketing("google");
+}
+// Build a KPI card that navigates when clicked (keyboard-accessible).
+function navCard(label, value, sub, nav) {
+  return `<div class="kpi-card clickable" data-nav="${nav}" role="button" tabindex="0"
+               aria-label="${escapeHtml(label)} — open ${nav === "marketing" ? "Marketing" : "Pipeline"}">
+    <div class="k-label">${label}</div><div class="k-value">${value}</div><div class="k-sub">${sub}</div></div>`;
+}
+// Wire click + Enter/Space on every [data-nav] card inside a container.
+function wireCardNav(container) {
+  container.querySelectorAll("[data-nav]").forEach((el) => {
+    const go = () => handleCardNav(el.dataset.nav);
+    el.onclick = go;
+    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+  });
+}
 
 function dashboardVisible() {
   return !$("dashboardView").classList.contains("hidden");
 }
+
+// ---------- global search ----------
+// Client-side search over the already-loaded leads (name / company / email).
+// Combobox pattern: ↑/↓ to move, Enter to open, Esc to dismiss. Selecting a
+// result opens that lead's drawer from whichever tab you're on.
+const SEARCH_LIMIT = 8;
+let searchMatches = [];
+let searchActive = -1; // index of the highlighted result, -1 = none
+
+function searchLeads(q) {
+  const needle = q.trim().toLowerCase();
+  if (!needle) return [];
+  return STATE.leads
+    .filter((l) => {
+      const hay = `${l.name || ""} ${l.company || ""} ${l.email || ""}`.toLowerCase();
+      return hay.includes(needle);
+    })
+    .slice(0, SEARCH_LIMIT);
+}
+
+function renderSearchResults() {
+  const box = $("searchResults");
+  const input = $("searchInput");
+  if (!searchMatches.length) {
+    if (input.value.trim()) {
+      box.innerHTML = '<div class="search-empty">No matching leads.</div>';
+      box.classList.remove("hidden");
+      input.setAttribute("aria-expanded", "true");
+    } else {
+      closeSearch();
+    }
+    return;
+  }
+  box.innerHTML = searchMatches
+    .map((l, i) => {
+      const sub = [l.company, l.email].filter(Boolean).map(escapeHtml).join(" · ");
+      return `<div class="search-item${i === searchActive ? " active" : ""}" role="option" id="search-opt-${i}"
+                   aria-selected="${i === searchActive}" data-id="${l.id}">
+        <span class="s-name">${escapeHtml(l.name)}</span>
+        ${sub ? `<span class="s-sub">${sub}</span>` : ""}
+      </div>`;
+    })
+    .join("");
+  box.classList.remove("hidden");
+  input.setAttribute("aria-expanded", "true");
+  input.setAttribute("aria-activedescendant", searchActive >= 0 ? `search-opt-${searchActive}` : "");
+  box.querySelectorAll(".search-item").forEach((el) => {
+    el.onmousedown = (e) => { e.preventDefault(); chooseSearch(el.dataset.id); };
+  });
+}
+
+function closeSearch() {
+  const box = $("searchResults");
+  box.classList.add("hidden");
+  box.innerHTML = "";
+  searchActive = -1;
+  $("searchInput").setAttribute("aria-expanded", "false");
+  $("searchInput").removeAttribute("aria-activedescendant");
+}
+
+function chooseSearch(id) {
+  const input = $("searchInput");
+  input.value = "";
+  searchMatches = [];
+  closeSearch();
+  input.blur();
+  openDrawer(id).catch((e) => showToast(e.message || "Couldn't open that lead", true));
+}
+
+function onSearchInput() {
+  searchMatches = searchLeads($("searchInput").value);
+  searchActive = -1;
+  renderSearchResults();
+}
+
+function onSearchKey(e) {
+  if (e.key === "ArrowDown") {
+    if (!searchMatches.length) return;
+    e.preventDefault();
+    searchActive = (searchActive + 1) % searchMatches.length;
+    renderSearchResults();
+  } else if (e.key === "ArrowUp") {
+    if (!searchMatches.length) return;
+    e.preventDefault();
+    searchActive = (searchActive - 1 + searchMatches.length) % searchMatches.length;
+    renderSearchResults();
+  } else if (e.key === "Enter") {
+    if (searchActive >= 0 && searchMatches[searchActive]) {
+      e.preventDefault();
+      chooseSearch(searchMatches[searchActive].id);
+    } else if (searchMatches.length === 1) {
+      e.preventDefault();
+      chooseSearch(searchMatches[0].id);
+    }
+  } else if (e.key === "Escape") {
+    $("searchInput").value = "";
+    searchMatches = [];
+    closeSearch();
+  }
+}
+
+$("searchInput").addEventListener("input", onSearchInput);
+$("searchInput").addEventListener("keydown", onSearchKey);
+$("searchInput").addEventListener("focus", () => { if ($("searchInput").value.trim()) onSearchInput(); });
+document.addEventListener("click", (e) => { if (!$("navSearch").contains(e.target)) closeSearch(); });
 
 function renderStageSelects() {
   const opts = STATE.stages
@@ -141,13 +286,27 @@ function renderStageList() {
 
 const SELECTED = new Set(); // lead ids currently selected on the board
 
+function renderBoardFilter() {
+  const chip = $("boardFilter");
+  const stage = STATE.boardFilter ? STATE.stages.find((s) => s.id === STATE.boardFilter) : null;
+  if (!stage) { chip.classList.add("hidden"); chip.innerHTML = ""; return; }
+  chip.classList.remove("hidden");
+  chip.innerHTML = `Filtered: ${escapeHtml(stage.name)} <span class="x">✕</span>`;
+  chip.title = "Clear filter";
+  chip.onclick = () => { STATE.boardFilter = null; renderBoard(); };
+}
+
 function renderBoard() {
   const board = $("board");
   if (!STATE.stages.length) { board.innerHTML = '<div class="empty">No stages.</div>'; return; }
   // drop any selected ids whose lead no longer exists
   const liveIds = new Set(STATE.leads.map((l) => l.id));
   for (const id of [...SELECTED]) if (!liveIds.has(id)) SELECTED.delete(id);
-  board.innerHTML = STATE.stages
+  // if a stage filter is active, show only that column
+  if (STATE.boardFilter && !STATE.stages.some((s) => s.id === STATE.boardFilter)) STATE.boardFilter = null;
+  renderBoardFilter();
+  const visibleStages = STATE.boardFilter ? STATE.stages.filter((s) => s.id === STATE.boardFilter) : STATE.stages;
+  board.innerHTML = visibleStages
     .map((stage) => {
       const leads = STATE.leads.filter((l) => l.stage_id === stage.id);
       const total = leads.reduce((sum, l) => sum + (l.value_cents || 0), 0);
@@ -318,14 +477,17 @@ function renderKpiRow(k) {
   const n = k.won_all + k.lost_all;
   const winRate = n === 0 ? "—" : Math.round((k.won_all / n) * 100) + "%";
   const cards = [
-    { label: "Open pipeline value", value: money(k.open_value_cents), sub: `${k.open_count} open lead${k.open_count === 1 ? "" : "s"}` },
-    { label: "Leads added · 30d", value: k.leads_added_30, sub: `vs ${k.leads_added_prev_30} prior · ${deltaHtml(k.leads_added_30, k.leads_added_prev_30)}` },
-    { label: "Won this month", value: `${k.won_this_month_count}`, sub: `${money(k.won_this_month_value)} · ${deltaHtml(k.won_this_month_count, k.won_last_month_count)}` },
+    { label: "Open pipeline value", value: money(k.open_value_cents), sub: `${k.open_count} open lead${k.open_count === 1 ? "" : "s"}`, nav: "pipeline" },
+    { label: "Leads added · 30d", value: k.leads_added_30, sub: `vs ${k.leads_added_prev_30} prior · ${deltaHtml(k.leads_added_30, k.leads_added_prev_30)}`, nav: "pipeline" },
+    { label: "Won this month", value: `${k.won_this_month_count}`, sub: `${money(k.won_this_month_value)} · ${deltaHtml(k.won_this_month_count, k.won_last_month_count)}`, nav: "pipeline-won" },
     { label: "Win rate", value: winRate, sub: n === 0 ? "no closed deals yet" : `${k.won_all} won / ${n} closed` },
   ];
   $("kpiRow").innerHTML = cards
-    .map((c) => `<div class="kpi-card"><div class="k-label">${c.label}</div><div class="k-value">${c.value}</div><div class="k-sub">${c.sub}</div></div>`)
+    .map((c) => c.nav
+      ? navCard(c.label, c.value, c.sub, c.nav)
+      : `<div class="kpi-card"><div class="k-label">${c.label}</div><div class="k-value">${c.value}</div><div class="k-sub">${c.sub}</div></div>`)
     .join("");
+  wireCardNav($("kpiRow"));
 }
 
 function renderFunnel(funnel) {
@@ -678,6 +840,8 @@ $("settingsBtn").onclick = () => {
   clearMsg($("inviteMsg"));
   $("inviteResult").classList.add("hidden");
   clearMsg($("budgetMsg"));
+  clearMsg($("changePwMsg"));
+  $("cp-current").value = ""; $("cp-new").value = ""; $("cp-confirm").value = "";
   openOverlay("settingsOverlay");
   api("/api/marketing/config").then((c) => { $("s-budget").value = Number(c.daily_budget_aud).toFixed(2); }).catch(() => {});
 };
@@ -695,6 +859,28 @@ $("saveBudget").onclick = async () => {
     showMsg($("budgetMsg"), e.message || "Couldn't save.");
   }
 };
+$("changePwForm").onsubmit = async (e) => {
+  e.preventDefault();
+  clearMsg($("changePwMsg"));
+  const current = $("cp-current").value;
+  const next = $("cp-new").value;
+  const confirm = $("cp-confirm").value;
+  if (!current || !next) { showMsg($("changePwMsg"), "Enter your current and new password."); return; }
+  if (next.length < 8) { showMsg($("changePwMsg"), "New password must be at least 8 characters."); return; }
+  if (next !== confirm) { showMsg($("changePwMsg"), "New passwords don't match."); return; }
+  const btn = $("savePassword");
+  btn.disabled = true;
+  try {
+    await api("/api/auth/change-password", { method: "POST", body: JSON.stringify({ current_password: current, new_password: next }) });
+    $("cp-current").value = ""; $("cp-new").value = ""; $("cp-confirm").value = "";
+    showMsg($("changePwMsg"), "Password updated.", true);
+  } catch (err) {
+    showMsg($("changePwMsg"), err.message || "Couldn't update your password.");
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 $("genInvite").onclick = async () => {
   clearMsg($("inviteMsg"));
   try {

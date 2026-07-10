@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reset password · ikai Sales</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1>Choose a new <span class="brand">password</span></h1>
+      <p class="sub">Set a new password for your ikai Sales account.</p>
+      <form id="resetForm">
+        <label for="rs-password">New password</label>
+        <input id="rs-password" type="password" autocomplete="new-password" minlength="8" required />
+        <label for="rs-confirm">Confirm new password</label>
+        <input id="rs-confirm" type="password" autocomplete="new-password" minlength="8" required />
+        <button class="btn block" type="submit">Set new password</button>
+      </form>
+      <div class="msg" id="resetMsg"></div>
+      <div class="toggle-row"><a href="/">Back to sign in</a></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const show = (msg, ok) => { const m = $("resetMsg"); m.className = "msg " + (ok ? "ok" : "error"); m.textContent = msg; };
+    const params = new URLSearchParams(location.search);
+    const token = params.get("token");
+
+    if (!token) {
+      show("This reset link is missing its token. Please request a new one from the sign-in page.");
+      $("resetForm").classList.add("hidden");
+    }
+
+    $("resetForm").onsubmit = async (e) => {
+      e.preventDefault();
+      const pw = $("rs-password").value;
+      const confirm = $("rs-confirm").value;
+      if (pw.length < 8) { show("Password must be at least 8 characters."); return; }
+      if (pw !== confirm) { show("Passwords don't match."); return; }
+      const btn = e.target.querySelector("button");
+      btn.disabled = true;
+      const r = await fetch("/api/auth/reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, password: pw }),
+      });
+      const data = await r.json().catch(() => ({}));
+      btn.disabled = false;
+      if (r.ok) {
+        $("resetForm").classList.add("hidden");
+        show("Password updated. Redirecting you to sign in…", true);
+        setTimeout(() => { location.href = "/"; }, 1800);
+      } else {
+        show(data.error || "Could not reset your password.");
+      }
+    };
+  </script>
+</body>
+</html>

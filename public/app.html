@@ -15,6 +15,13 @@
       <button class="tab" id="tabPipeline" data-tab="pipeline">Pipeline</button>
       <button class="tab" id="tabMarketing" data-tab="marketing">Marketing</button>
     </nav>
+    <div class="nav-search" id="navSearch">
+      <span class="nav-search-icon" aria-hidden="true">⌕</span>
+      <input id="searchInput" type="search" placeholder="Search leads…" autocomplete="off"
+             role="combobox" aria-expanded="false" aria-controls="searchResults"
+             aria-autocomplete="list" aria-label="Search leads by name, company or email" />
+      <div class="search-results hidden" id="searchResults" role="listbox" aria-label="Lead search results"></div>
+    </div>
     <div class="spacer"></div>
     <button class="btn" id="addLeadBtn">+ Add lead</button>
     <button class="btn ghost sm" id="importBtn">Import CSV</button>
@@ -60,6 +67,7 @@
       <div class="board-toolbar">
         <label class="select-all"><input type="checkbox" id="selectAll"> Select all</label>
         <span class="sel-count" id="selCount"></span>
+        <button class="board-filter hidden" id="boardFilter" type="button"></button>
         <span class="toolbar-spacer"></span>
         <button class="btn ghost sm hidden" id="exportSelected" type="button">Export selected</button>
         <button class="btn ghost sm" id="exportAll" type="button">Export all</button>
@@ -350,6 +358,21 @@
           <button class="btn sm" id="saveBudget">Save</button>
         </div>
         <div class="msg" id="budgetMsg"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Change password</h3>
+        <p class="sub" style="margin:6px 0 8px;">Update the password for your account. Other signed-in sessions will be logged out.</p>
+        <form id="changePwForm" autocomplete="off">
+          <label>Current password</label>
+          <input id="cp-current" type="password" autocomplete="current-password" />
+          <label>New password</label>
+          <input id="cp-new" type="password" autocomplete="new-password" minlength="8" />
+          <label>Confirm new password</label>
+          <input id="cp-confirm" type="password" autocomplete="new-password" minlength="8" />
+          <button class="btn sm" id="savePassword" type="submit" style="margin-top:12px;">Update password</button>
+        </form>
+        <div class="msg" id="changePwMsg"></div>
       </div>
 
       <div class="settings-section">
