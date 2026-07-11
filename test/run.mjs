@@ -194,6 +194,47 @@ async function main() {
   const badImport = await owner.post("/api/leads/import", { notrows: true });
   check("malformed import rejected", badImport.status === 400);
 
+  // ---- Test 8: global search (leads / reminders / stages / sections) ----
+  section("Test 8 — Global search across leads, reminders, stages, sections");
+  // seed a reminder with a distinctive note to search for
+  const remCreate = await owner.post(`/api/leads/${alice.id}/reminders`, {
+    remind_at: new Date(Date.now() + 86400000).toISOString(),
+    note: "call back re pricing quote",
+  });
+  check("reminder created for search", remCreate.status === 201, JSON.stringify(remCreate.data));
+
+  const byCompany = await owner.get("/api/search?q=acme");
+  check("search matches lead by company (Acme→Alice)",
+    (byCompany.data.leads || []).some((l) => l.name === "Alice"), JSON.stringify(byCompany.data.leads));
+
+  const byNotes = await owner.get("/api/search?q=hot");
+  const irisHit = (byNotes.data.leads || []).find((l) => l.name === "Iris");
+  check("search matches lead by notes (Iris, notes='hot')", !!irisHit);
+  check("notes-only match returns a snippet", irisHit && typeof irisHit.snippet === "string" && irisHit.snippet.length > 0, irisHit ? String(irisHit.snippet) : "no iris");
+
+  const byReminder = await owner.get("/api/search?q=pricing");
+  check("search matches open reminder by note",
+    (byReminder.data.reminders || []).some((r) => /pricing/i.test(r.note || "") && r.lead_id === alice.id),
+    JSON.stringify(byReminder.data.reminders));
+
+  const byStage = await owner.get("/api/search?q=won");
+  check("search matches pipeline stage (Won)",
+    (byStage.data.stages || []).some((s) => s.name === "Won"), JSON.stringify(byStage.data.stages));
+
+  const bySection = await owner.get("/api/search?q=google ads");
+  const gsec = (bySection.data.sections || []).find((s) => s.key === "mkt-google");
+  check("search matches marketing section (Google Ads)", !!gsec && gsec.tab === "marketing" && gsec.channel === "google", JSON.stringify(bySection.data.sections));
+
+  const tooShort = await owner.get("/api/search?q=a");
+  check("query < 2 chars returns empty groups",
+    (tooShort.data.leads || []).length === 0 && (tooShort.data.stages || []).length === 0 && (tooShort.data.sections || []).length === 0);
+
+  const crossSearch = await owner2.get("/api/search?q=acme");
+  check("search is tenant-scoped (owner2 sees no Acme lead)", (crossSearch.data.leads || []).length === 0, JSON.stringify(crossSearch.data.leads));
+
+  const anonSearch = await new Client().get("/api/search?q=acme");
+  check("search requires auth (401)", anonSearch.status === 401, "got " + anonSearch.status);
+
   // ---- summary ----
   console.log(results.join("\n"));
   console.log(`\n${pass} passed, ${fail} failed.`);

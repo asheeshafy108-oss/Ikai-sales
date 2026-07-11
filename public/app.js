@@ -166,53 +166,100 @@ function dashboardVisible() {
 }
 
 // ---------- global search ----------
-// Client-side search over the already-loaded leads (name / company / email).
-// Combobox pattern: ↑/↓ to move, Enter to open, Esc to dismiss. Selecting a
-// result opens that lead's drawer from whichever tab you're on.
-const SEARCH_LIMIT = 8;
-let searchMatches = [];
-let searchActive = -1; // index of the highlighted result, -1 = none
+// Whole-dashboard search via GET /api/search (debounced): leads, open reminders,
+// pipeline stages, and marketing/app sections — grouped in the dropdown. Combobox
+// keys: "/" focuses, ↑/↓ move, Enter selects, Esc closes. Leads/reminders open a
+// drawer; stages/sections navigate.
+const SEARCH_DEBOUNCE_MS = 200;
+const SEARCH_MIN = 2;
+let searchFlat = [];   // flattened rows for keyboard nav: {type, data}
+let searchActive = -1; // highlighted flat index, -1 = none
+let searchSeq = 0;     // guards against out-of-order responses
+let searchTimer = null;
 
-function searchLeads(q) {
-  const needle = q.trim().toLowerCase();
-  if (!needle) return [];
-  return STATE.leads
-    .filter((l) => {
-      const hay = `${l.name || ""} ${l.company || ""} ${l.email || ""}`.toLowerCase();
-      return hay.includes(needle);
-    })
-    .slice(0, SEARCH_LIMIT);
+function onSearchInput() {
+  const q = $("searchInput").value.trim();
+  clearTimeout(searchTimer);
+  if (q.length < SEARCH_MIN) { searchFlat = []; closeSearch(); return; }
+  searchTimer = setTimeout(() => {
+    const seq = ++searchSeq;
+    api(`/api/search?q=${encodeURIComponent(q)}`)
+      .then((data) => { if (seq === searchSeq) buildSearchResults(data); })
+      .catch(() => { /* transient; leave prior results */ });
+  }, SEARCH_DEBOUNCE_MS);
 }
 
-function renderSearchResults() {
+const SEARCH_GROUPS = [
+  { key: "leads", title: "Leads", type: "lead" },
+  { key: "reminders", title: "Reminders", type: "reminder" },
+  { key: "stages", title: "Stages", type: "stage" },
+  { key: "sections", title: "Go to", type: "section" },
+];
+
+function buildSearchResults(data) {
   const box = $("searchResults");
   const input = $("searchInput");
-  if (!searchMatches.length) {
-    if (input.value.trim()) {
-      box.innerHTML = '<div class="search-empty">No matching leads.</div>';
-      box.classList.remove("hidden");
-      input.setAttribute("aria-expanded", "true");
-    } else {
-      closeSearch();
-    }
+  searchFlat = [];
+  searchActive = -1;
+  const total = SEARCH_GROUPS.reduce((n, g) => n + (data[g.key] ? data[g.key].length : 0), 0);
+  if (!total) {
+    box.innerHTML = '<div class="search-empty">No matches.</div>';
+    box.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    input.removeAttribute("aria-activedescendant");
     return;
   }
-  box.innerHTML = searchMatches
-    .map((l, i) => {
-      const sub = [l.company, l.email].filter(Boolean).map(escapeHtml).join(" · ");
-      return `<div class="search-item${i === searchActive ? " active" : ""}" role="option" id="search-opt-${i}"
-                   aria-selected="${i === searchActive}" data-id="${l.id}">
-        <span class="s-name">${escapeHtml(l.name)}</span>
-        ${sub ? `<span class="s-sub">${sub}</span>` : ""}
-      </div>`;
-    })
-    .join("");
+  let html = "";
+  for (const g of SEARCH_GROUPS) {
+    const items = data[g.key] || [];
+    if (!items.length) continue;
+    html += `<div class="search-group" role="presentation">${g.title}</div>`;
+    for (const it of items) {
+      const idx = searchFlat.length;
+      searchFlat.push({ type: g.type, data: it });
+      html += searchRowHtml(g.type, it, idx);
+    }
+  }
+  box.innerHTML = html;
   box.classList.remove("hidden");
   input.setAttribute("aria-expanded", "true");
-  input.setAttribute("aria-activedescendant", searchActive >= 0 ? `search-opt-${searchActive}` : "");
+  input.removeAttribute("aria-activedescendant");
   box.querySelectorAll(".search-item").forEach((el) => {
-    el.onmousedown = (e) => { e.preventDefault(); chooseSearch(el.dataset.id); };
+    el.onmousedown = (e) => { e.preventDefault(); chooseSearchIndex(Number(el.dataset.idx)); };
   });
+}
+
+function searchRowHtml(type, it, idx) {
+  let icon = "", name = "", sub = "";
+  if (type === "lead") {
+    name = escapeHtml(it.name);
+    sub = it.snippet ? escapeHtml(it.snippet) : [it.company, it.email].filter(Boolean).map(escapeHtml).join(" · ");
+  } else if (type === "reminder") {
+    icon = "⏰ ";
+    name = escapeHtml(it.note || "Reminder");
+    sub = "on " + escapeHtml(it.lead_name) + (it.remind_at ? " · " + new Date(it.remind_at).toLocaleDateString() : "");
+  } else if (type === "stage") {
+    icon = "▸ ";
+    name = escapeHtml(it.name);
+    sub = "Filter pipeline to this stage";
+  } else { // section
+    name = escapeHtml(it.label);
+    sub = "Open";
+  }
+  return `<div class="search-item" role="option" id="search-opt-${idx}" aria-selected="false" data-idx="${idx}">
+    <span class="s-name">${icon}${name}</span>${sub ? `<span class="s-sub">${sub}</span>` : ""}</div>`;
+}
+
+function updateSearchActive() {
+  const box = $("searchResults");
+  const rows = box.querySelectorAll(".search-item");
+  rows.forEach((el, i) => {
+    const on = i === searchActive;
+    el.classList.toggle("active", on);
+    el.setAttribute("aria-selected", on ? "true" : "false");
+    if (on) el.scrollIntoView({ block: "nearest" });
+  });
+  $("searchInput").setAttribute("aria-activedescendant", searchActive >= 0 ? `search-opt-${searchActive}` : "");
 }
 
 function closeSearch() {
@@ -224,51 +271,60 @@ function closeSearch() {
   $("searchInput").removeAttribute("aria-activedescendant");
 }
 
-function chooseSearch(id) {
+function chooseSearchIndex(i) {
+  const entry = searchFlat[i];
+  if (!entry) return;
   const input = $("searchInput");
   input.value = "";
-  searchMatches = [];
+  searchFlat = [];
   closeSearch();
   input.blur();
-  openDrawer(id).catch((e) => showToast(e.message || "Couldn't open that lead", true));
-}
-
-function onSearchInput() {
-  searchMatches = searchLeads($("searchInput").value);
-  searchActive = -1;
-  renderSearchResults();
+  const { type, data } = entry;
+  if (type === "lead") openDrawer(data.id).catch((e) => showToast(e.message || "Couldn't open that lead", true));
+  else if (type === "reminder") openDrawer(data.lead_id).catch((e) => showToast(e.message || "Couldn't open that lead", true));
+  else if (type === "stage") goToPipeline(data.id);
+  else if (type === "section") {
+    if (data.tab === "marketing") goToMarketing(data.channel || "overview");
+    else if (data.tab === "pipeline") goToPipeline(null);
+    else showTab(data.tab);
+  }
 }
 
 function onSearchKey(e) {
   if (e.key === "ArrowDown") {
-    if (!searchMatches.length) return;
+    if (!searchFlat.length) return;
     e.preventDefault();
-    searchActive = (searchActive + 1) % searchMatches.length;
-    renderSearchResults();
+    searchActive = (searchActive + 1) % searchFlat.length;
+    updateSearchActive();
   } else if (e.key === "ArrowUp") {
-    if (!searchMatches.length) return;
+    if (!searchFlat.length) return;
     e.preventDefault();
-    searchActive = (searchActive - 1 + searchMatches.length) % searchMatches.length;
-    renderSearchResults();
+    searchActive = (searchActive - 1 + searchFlat.length) % searchFlat.length;
+    updateSearchActive();
   } else if (e.key === "Enter") {
-    if (searchActive >= 0 && searchMatches[searchActive]) {
-      e.preventDefault();
-      chooseSearch(searchMatches[searchActive].id);
-    } else if (searchMatches.length === 1) {
-      e.preventDefault();
-      chooseSearch(searchMatches[0].id);
-    }
+    if (searchActive >= 0) { e.preventDefault(); chooseSearchIndex(searchActive); }
+    else if (searchFlat.length === 1) { e.preventDefault(); chooseSearchIndex(0); }
   } else if (e.key === "Escape") {
     $("searchInput").value = "";
-    searchMatches = [];
+    searchFlat = [];
     closeSearch();
+    $("searchInput").blur();
   }
 }
 
 $("searchInput").addEventListener("input", onSearchInput);
 $("searchInput").addEventListener("keydown", onSearchKey);
-$("searchInput").addEventListener("focus", () => { if ($("searchInput").value.trim()) onSearchInput(); });
+$("searchInput").addEventListener("focus", () => { if ($("searchInput").value.trim().length >= SEARCH_MIN) onSearchInput(); });
 document.addEventListener("click", (e) => { if (!$("navSearch").contains(e.target)) closeSearch(); });
+// "/" focuses the search box (unless the user is typing in a field already).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const el = document.activeElement;
+  const tag = (el && el.tagName) || "";
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (el && el.isContentEditable)) return;
+  e.preventDefault();
+  $("searchInput").focus();
+});
 
 function renderStageSelects() {
   const opts = STATE.stages

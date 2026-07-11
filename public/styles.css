@@ -385,6 +385,11 @@ main { padding: 18px 20px 60px; }
   background: var(--card); border: 1px solid var(--border); border-radius: 12px;
   box-shadow: var(--shadow); overflow: hidden; max-height: 340px; overflow-y: auto;
 }
+.search-group {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); padding: 9px 12px 4px; background: var(--card-2);
+  border-bottom: 1px solid var(--border);
+}
 .search-item {
   display: flex; flex-direction: column; gap: 2px; padding: 9px 12px; cursor: pointer;
   border-bottom: 1px solid var(--border);

@@ -1534,6 +1534,80 @@ async function handleDashboard(session, env) {
   });
 }
 
+// ---------- global search ----------
+// Static, navigable app sections. Matched by label/term against the query; the
+// frontend uses {tab, channel} to jump there. Keep in sync with the UI tabs.
+const SEARCH_SECTIONS = [
+  { key: "dashboard", label: "Dashboard", tab: "dashboard", terms: ["dashboard", "home", "funnel", "pipeline flow", "stale leads", "recent activity", "win rate", "kpi"] },
+  { key: "pipeline", label: "Pipeline", tab: "pipeline", terms: ["pipeline", "board", "kanban", "deals"] },
+  { key: "mkt-overview", label: "Marketing · Overview", tab: "marketing", channel: "overview", terms: ["marketing", "overview", "channels", "leads by source"] },
+  { key: "mkt-google", label: "Marketing · Google", tab: "marketing", channel: "google", terms: ["google", "google ads", "adwords", "sessions", "campaign conversions", "budget", "spend", "cpc", "ctr", "clicks", "impressions", "traffic"] },
+  { key: "mkt-linkedin", label: "Marketing · LinkedIn", tab: "marketing", channel: "linkedin", terms: ["linkedin"] },
+  { key: "mkt-meta", label: "Marketing · Meta", tab: "marketing", channel: "meta", terms: ["meta", "facebook", "instagram"] },
+  { key: "mkt-email", label: "Marketing · Email", tab: "marketing", channel: "email", terms: ["email marketing", "newsletter", "campaign email"] },
+  { key: "mkt-sms", label: "Marketing · SMS", tab: "marketing", channel: "sms", terms: ["sms", "text message"] },
+];
+
+// Build a LIKE pattern that treats user input literally (wildcards escaped).
+// Pairs with `ESCAPE '\'` in the SQL.
+function likeParam(q) {
+  return "%" + q.toLowerCase().replace(/[\\%_]/g, (c) => "\\" + c) + "%";
+}
+
+// When a lead only matches on its notes, surface a short excerpt around the hit.
+function notesSnippet(notes, ql) {
+  if (!notes) return null;
+  const idx = notes.toLowerCase().indexOf(ql);
+  if (idx < 0) return null;
+  const start = Math.max(0, idx - 24);
+  const end = Math.min(notes.length, idx + ql.length + 24);
+  return (start > 0 ? "…" : "") + notes.slice(start, end).trim() + (end < notes.length ? "…" : "");
+}
+
+// GET /api/search?q= — tenant-scoped search across leads, open reminders,
+// pipeline stages, and static app sections. Grouped, capped per group.
+async function handleSearch(session, env, url) {
+  const q = (url.searchParams.get("q") || "").trim();
+  const out = { query: q, leads: [], reminders: [], stages: [], sections: [] };
+  if (q.length < 2) return json(out);
+  const t = session.tenant_id;
+  const like = likeParam(q);
+  const ql = q.toLowerCase();
+
+  const [leadsRes, remRes, stageRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, name, company, email, notes FROM leads
+         WHERE tenant_id = ? AND (
+           lower(name) LIKE ? ESCAPE '\\'
+           OR lower(COALESCE(company,'')) LIKE ? ESCAPE '\\'
+           OR lower(COALESCE(email,'')) LIKE ? ESCAPE '\\'
+           OR lower(COALESCE(notes,'')) LIKE ? ESCAPE '\\')
+         ORDER BY updated_at DESC LIMIT 8`,
+    ).bind(t, like, like, like, like).all(),
+    env.DB.prepare(
+      `SELECT r.id, r.lead_id, r.note, r.remind_at, l.name AS lead_name
+         FROM reminders r JOIN leads l ON l.id = r.lead_id
+        WHERE r.tenant_id = ? AND r.status = 'open' AND lower(COALESCE(r.note,'')) LIKE ? ESCAPE '\\'
+        ORDER BY r.remind_at ASC LIMIT 6`,
+    ).bind(t, like).all(),
+    env.DB.prepare(
+      `SELECT id, name FROM stages WHERE tenant_id = ? AND lower(name) LIKE ? ESCAPE '\\' ORDER BY position`,
+    ).bind(t, like).all(),
+  ]);
+
+  out.leads = leadsRes.results.map((l) => {
+    const hitOnlyNotes = ![l.name, l.company, l.email].some((v) => (v || "").toLowerCase().includes(ql));
+    return { id: l.id, name: l.name, company: l.company || null, email: l.email || null,
+      snippet: hitOnlyNotes ? notesSnippet(l.notes, ql) : null };
+  });
+  out.reminders = remRes.results.map((r) => ({ id: r.id, lead_id: r.lead_id, lead_name: r.lead_name, note: r.note, remind_at: r.remind_at }));
+  out.stages = stageRes.results.map((s) => ({ id: s.id, name: s.name }));
+  out.sections = SEARCH_SECTIONS
+    .filter((s) => s.label.toLowerCase().includes(ql) || s.terms.some((term) => term.includes(ql)))
+    .map((s) => ({ key: s.key, label: s.label, tab: s.tab, channel: s.channel || null }));
+  return json(out);
+}
+
 // ---------- router ----------
 export default {
   async fetch(req, env, ctx) {
@@ -1561,6 +1635,7 @@ export default {
       if (!session) return err("Unauthorized", 401);
 
       if (path === "/api/me" && method === "GET") return await handleMe(session, env);
+      if (path === "/api/search" && method === "GET") return await handleSearch(session, env, url);
       if (path === "/api/auth/change-password" && method === "POST") return await handleChangePassword(session, env, req);
       if (path === "/api/stages" && method === "GET") return await handleGetStages(session, env);
       if (path === "/api/dashboard" && method === "GET") {
